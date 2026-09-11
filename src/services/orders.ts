@@ -1,11 +1,32 @@
 import { createHash } from "node:crypto";
 
-import { Prisma } from "@/generated/prisma/client";
+import { OrderStatus, Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getOrCreateOpenSessionForTable } from "@/services/sessions";
 import { getTableByQrToken } from "@/services/tables";
 
 export const MAX_ORDER_ITEM_QUANTITY = 99;
+
+export const OPERATIONAL_ORDER_STATUSES = [
+  OrderStatus.PENDING,
+  OrderStatus.PREPARING,
+  OrderStatus.READY,
+] as const;
+
+// A maquina de estados da Etapa 10: somente avancos simples.
+export const ALLOWED_ORDER_TRANSITIONS: Record<
+  OrderStatus,
+  readonly OrderStatus[]
+> = {
+  PENDING: [OrderStatus.PREPARING],
+  PREPARING: [OrderStatus.READY],
+  READY: [],
+  CANCELLED: [],
+};
+
+export const OPERATIONAL_ORDER_STATUS_LIST: OrderStatus[] = [
+  ...OPERATIONAL_ORDER_STATUSES,
+];
 
 export type CreateOrderInputItem = {
   productId: string;
@@ -263,4 +284,151 @@ export async function createOrderForTableQrToken(
     }
     throw error;
   }
+}
+
+const operationalOrderListSelect = {
+  id: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  sessionId: true,
+  session: {
+    select: {
+      table: {
+        select: { number: true },
+      },
+    },
+  },
+  items: {
+    select: {
+      id: true,
+      productName: true,
+      unitPrice: true,
+      quantity: true,
+      subtotal: true,
+    },
+    orderBy: { productName: "asc" },
+  },
+} satisfies Prisma.OrderSelect;
+
+type OperationalOrderRow = Prisma.OrderGetPayload<{
+  select: typeof operationalOrderListSelect;
+}>;
+
+export type OperationalOrderDto = {
+  id: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  tableNumber: number;
+  items: {
+    id: string;
+    productName: string;
+    unitPrice: string;
+    quantity: number;
+    subtotal: string;
+  }[];
+  total: string;
+};
+
+function toOperationalOrderDto(
+  order: OperationalOrderRow
+): OperationalOrderDto {
+  // Total sempre calculado a partir dos snapshots (OrderItem), nunca do
+  // Product atual. Arredondamento Decimal exato, sem Float.
+  const total = order.items.reduce(
+    (acc, item) => acc.add(item.subtotal),
+    new Prisma.Decimal(0)
+  );
+  return {
+    id: order.id,
+    status: order.status,
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString(),
+    tableNumber: order.session.table.number,
+    items: order.items.map((item) => ({
+      id: item.id,
+      productName: item.productName,
+      unitPrice: item.unitPrice.toFixed(2),
+      quantity: item.quantity,
+      subtotal: item.subtotal.toFixed(2),
+    })),
+    total: total.toFixed(2),
+  };
+}
+
+// Painel operacional: apenas pedidos PENDING / PREPARING / READY do
+// restaurante. Tenant scoped pelo where "restaurantId". Todas as relacoes
+// (session -> table) e itens vêm na mesma query (sem N+1).
+// Ordenacao: fluxo operacional (PENDING, PREPARING, READY) e, dentro de cada
+// status, os mais antigos primeiro.
+export async function listOperationalOrdersByRestaurantId(
+  restaurantId: string
+): Promise<OperationalOrderDto[]> {
+  const orders = await prisma.order.findMany({
+    where: {
+      restaurantId,
+      status: { in: OPERATIONAL_ORDER_STATUS_LIST },
+    },
+    select: operationalOrderListSelect,
+    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+  });
+  return orders.map(toOperationalOrderDto);
+}
+
+export type UpdateOrderStatusResult =
+  | { outcome: "updated"; id: string; status: string; updatedAt: string }
+  | { outcome: "order-not-found" }
+  | { outcome: "invalid-transition" }
+  | { outcome: "status-conflict" };
+
+// Atualizacao condicional/atomica: o WHERE inclui o status esperado.
+// Se outra request mudou o estado entre a leitura e o update, a query retorna
+// count 0 e a operacao responde 409 ORDER_STATUS_CONFLICT em vez de sobrescrever.
+// Nunca expoe pedidos de outro tenant: o where sempre filtra restaurantId, e o
+// pedido inexistente/cross-tenant responde "order-not-found" (404).
+export async function updateOrderStatus({
+  restaurantId,
+  orderId,
+  status,
+}: {
+  restaurantId: string;
+  orderId: string;
+  status: OrderStatus;
+}): Promise<UpdateOrderStatusResult> {
+  const current = await prisma.order.findFirst({
+    where: { id: orderId, restaurantId },
+    select: { status: true },
+  });
+  if (!current) {
+    return { outcome: "order-not-found" };
+  }
+
+  const allowed = ALLOWED_ORDER_TRANSITIONS[current.status];
+  if (!allowed.includes(status)) {
+    return { outcome: "invalid-transition" };
+  }
+
+  const updated = await prisma.order.updateMany({
+    where: { id: orderId, restaurantId, status: current.status },
+    data: { status },
+  });
+  if (updated.count !== 1) {
+    return { outcome: "status-conflict" };
+  }
+
+  const refreshed = await prisma.order.findFirst({
+    where: { id: orderId, restaurantId },
+    select: { updatedAt: true },
+  });
+  if (!refreshed) {
+    return { outcome: "order-not-found" };
+  }
+
+  return {
+    outcome: "updated",
+    id: orderId,
+    status,
+    updatedAt: refreshed.updatedAt.toISOString(),
+  };
 }

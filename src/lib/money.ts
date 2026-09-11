@@ -27,3 +27,17 @@ export function priceStringToCents(value: string): number {
 export function formatMoneyCents(cents: number): string {
   return brlFormatter.format(cents / 100);
 }
+
+// Formata uma string decimal exata (ex.: "59.70") como moeda pt-BR
+// ("R$ 59,70") usando apenas manipulacao de string — sem Float.
+export function formatBrzDecimal(value: string): string {
+  const normalized = value.trim();
+  const negative = normalized.startsWith("-");
+  const unsigned = negative ? normalized.slice(1) : normalized;
+  const [intPart = "0", decPart = "0"] = unsigned.split(".");
+  const centavos = decPart.padEnd(2, "0").slice(0, 2);
+  const groupedInt = intPart
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ".")
+    .replace(/^\./, "");
+  return `${negative ? "-" : ""}R$ ${groupedInt},${centavos}`;
+}
