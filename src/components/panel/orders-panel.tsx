@@ -1,7 +1,9 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { authClient } from "@/lib/auth-client";
 import { formatBrzDecimal } from "@/lib/money";
 
 type PanelOrder = {
@@ -72,6 +74,7 @@ export function OrdersPanel({
   restaurantSlug,
   restaurantName,
 }: OrdersPanelProps) {
+  const router = useRouter();
   const [orders, setOrders] = useState<PanelOrder[]>([]);
   const [phase, setPhase] = useState<"loading" | "ready">("loading");
   const [refreshing, setRefreshing] = useState(false);
@@ -86,7 +89,12 @@ export function OrdersPanel({
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const loadingRef = useRef(false);
 
-  const loadOrders = useCallback(async () => {
+  const goToLogin = useCallback(() => {
+  router.replace("/login");
+  router.refresh();
+}, [router]);
+
+const loadOrders = useCallback(async () => {
     if (loadingRef.current) {
       return;
     }
@@ -97,6 +105,11 @@ export function OrdersPanel({
         `/api/restaurant/${restaurantSlug}/orders`,
         { cache: "no-store" }
       );
+      if (response.status === 401) {
+        // Sessao expirada/invalida: volta para o login.
+        goToLogin();
+        return;
+      }
       if (!response.ok) {
         throw new Error(`list failed with ${response.status}`);
       }
@@ -113,7 +126,7 @@ export function OrdersPanel({
       loadingRef.current = false;
       setRefreshing(false);
     }
-  }, [restaurantSlug]);
+  }, [restaurantSlug, goToLogin]);
 
   useEffect(() => {
     // Primeira carga + polling leve (~5s) apenas enquanto o painel esta aberto.
@@ -146,6 +159,11 @@ export function OrdersPanel({
       const data = (await response.json().catch(() => null)) as {
         code?: string;
       } | null;
+
+      if (response.status === 401) {
+        goToLogin();
+        return;
+      }
 
       await loadOrders();
 
@@ -181,16 +199,35 @@ export function OrdersPanel({
 
   const anyOrders = orders.length > 0;
 
+  async function handleSignOut() {
+    try {
+      await authClient.signOut();
+    } finally {
+      goToLogin();
+    }
+  }
+
   return (
     <main className="min-h-dvh bg-zinc-100">
       <header className="border-b border-zinc-200 bg-white">
         <div className="mx-auto w-full max-w-6xl px-4 py-4 sm:px-6">
-          <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">
-            JULLY
-          </p>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-900">
-            {restaurantName}
-          </h1>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">
+                JULLY
+              </p>
+              <h1 className="text-2xl font-bold tracking-tight text-zinc-900">
+                {restaurantName}
+              </h1>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              className="rounded-full border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900"
+            >
+              Sair
+            </button>
+          </div>
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="button"

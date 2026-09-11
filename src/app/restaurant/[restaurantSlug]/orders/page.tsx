@@ -1,15 +1,17 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { OrdersPanel } from "@/components/panel/orders-panel";
-import { getRestaurantBySlug } from "@/services/restaurants";
+import { requireRestaurantAccess } from "@/lib/require-restaurant-access";
 
 export const dynamic = "force-dynamic";
 
 const RESTAURANT_SLUG_PATTERN = /^[a-z0-9-]{1,100}$/;
 
 // /restaurant/[restaurantSlug]/orders
-// Painel operacional do restaurante. O slug resolve apenas o restaurante;
-// nao e autorizacao. Pagina controlada: slug invalido ou inexistente -> 404.
+// Painel operacional do restaurante — exige sessao valida + membership.
+//   - sem sessao              -> /login
+//   - slug invalido/inexistente ou sem membership -> 404 (nao revela tenant).
+// Toda operacao posterior usa restaurant.id (obtido do contexto autorizado).
 export default async function RestaurantOrdersPage({
   params,
 }: {
@@ -21,21 +23,19 @@ export default async function RestaurantOrdersPage({
     notFound();
   }
 
-  let restaurant: Awaited<ReturnType<typeof getRestaurantBySlug>>;
-  try {
-    restaurant = await getRestaurantBySlug(restaurantSlug);
-  } catch {
-    notFound();
-  }
+  const access = await requireRestaurantAccess(restaurantSlug);
 
-  if (!restaurant) {
+  if (!access.ok && access.reason === "unauthenticated") {
+    redirect(`/login?next=${encodeURIComponent(`/restaurant/${restaurantSlug}/orders`)}`);
+  }
+  if (!access.ok) {
     notFound();
   }
 
   return (
     <OrdersPanel
-      restaurantSlug={restaurant.slug}
-      restaurantName={restaurant.name}
+      restaurantSlug={access.context.restaurantSlug}
+      restaurantName={access.context.restaurantName}
     />
   );
 }

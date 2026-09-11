@@ -8,9 +8,9 @@ export const sessionPublicSelect = {
   status: true,
   openedAt: true,
   closedAt: true,
-} satisfies Prisma.SessionSelect;
+} satisfies Prisma.TableSessionSelect;
 
-export type SessionPublic = Prisma.SessionGetPayload<{
+export type SessionPublic = Prisma.TableSessionGetPayload<{
   select: typeof sessionPublicSelect;
 }>;
 
@@ -21,7 +21,7 @@ export async function getOpenSessionByTable({
   restaurantId: string;
   tableId: string;
 }): Promise<SessionPublic | null> {
-  return prisma.session.findFirst({
+  return prisma.tableSession.findFirst({
     where: { restaurantId, tableId, status: SessionStatus.OPEN },
     select: sessionPublicSelect,
   });
@@ -34,7 +34,7 @@ export async function getSessionById({
   restaurantId: string;
   sessionId: string;
 }): Promise<SessionPublic | null> {
-  return prisma.session.findFirst({
+  return prisma.tableSession.findFirst({
     where: { id: sessionId, restaurantId },
     select: sessionPublicSelect,
   });
@@ -63,7 +63,7 @@ export async function getOrCreateOpenSessionForTable({
   }
 
   try {
-    const session = await prisma.session.create({
+    const session = await prisma.tableSession.create({
       data: {
         restaurantId,
         tableId,

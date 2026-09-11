@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 import { errorResponse } from "@/lib/public-api";
+import { requireRestaurantAccess } from "@/lib/require-restaurant-access";
 import { listOperationalOrdersByRestaurantId } from "@/services/orders";
-import { getRestaurantBySlug } from "@/services/restaurants";
 
 const slugSchema = z
   .string()
@@ -12,8 +12,11 @@ const slugSchema = z
   .regex(/^[a-z0-9-]+$/, { message: "Invalid restaurant slug" });
 
 // GET /api/restaurant/[restaurantSlug]/orders
-// Lista apenas pedidos operacionais (PENDING/PREPARING/READY) do restaurante.
-// O slug resolve apenas o restaurante — nao e autorizacao.
+// Lista apenas pedidos operacionais (PENDING/PREPARING/READY) do restaurante
+// para um operador AUTENTICADO com membership no tenant.
+//   - sem sessao                -> 401 UNAUTHORIZED
+//   - restaurante inexistente OU sem membership -> 404 RESTAURANT_NOT_FOUND
+//     (respostas identicas: nao revela tenants para quem nao tem acesso)
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ restaurantSlug: string }> }
@@ -25,8 +28,11 @@ export async function GET(
     return errorResponse(400, "Invalid restaurant slug");
   }
 
-  const restaurant = await getRestaurantBySlug(parsedSlug.data);
-  if (!restaurant) {
+  const access = await requireRestaurantAccess(parsedSlug.data);
+  if (!access.ok && access.reason === "unauthenticated") {
+    return errorResponse(401, "Unauthorized");
+  }
+  if (!access.ok) {
     return errorResponse(404, "Restaurant not found", "RESTAURANT_NOT_FOUND");
   }
 
@@ -34,7 +40,9 @@ export async function GET(
     ReturnType<typeof listOperationalOrdersByRestaurantId>
   >;
   try {
-    orders = await listOperationalOrdersByRestaurantId(restaurant.id);
+    orders = await listOperationalOrdersByRestaurantId(
+      access.context.restaurantId
+    );
   } catch (error) {
     console.error("[panel] failed to list operational orders:", error);
     return errorResponse(500, "Internal server error");
@@ -42,9 +50,9 @@ export async function GET(
 
   return Response.json({
     restaurant: {
-      id: restaurant.id,
-      name: restaurant.name,
-      slug: restaurant.slug,
+      id: access.context.restaurantId,
+      name: access.context.restaurantName,
+      slug: access.context.restaurantSlug,
     },
     orders,
   });

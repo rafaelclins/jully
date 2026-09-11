@@ -22,20 +22,26 @@ enum OrderStatus {
   CANCELLED
 }
 
-model Restaurant {
-  id               String   @id @default(uuid()) @db.Uuid
-  name             String
-  slug             String   @unique
-  logo             String?
-  primaryColor     String?
-  secondaryColor   String?
-  address          String?
-  serviceFeePercent Decimal @default(0) @db.Decimal(5, 2)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+enum MembershipRole {
+  OWNER
+  OPERATOR
+}
 
-  tables     Table[]
-  categories Category[]
+model Restaurant {
+  id                String   @id @default(uuid()) @db.Uuid
+  name              String
+  slug              String   @unique
+  logo              String?
+  primaryColor      String?
+  secondaryColor    String?
+  address           String?
+  serviceFeePercent Decimal  @default(0) @db.Decimal(5, 2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tables       Table[]
+  categories   Category[]
+  memberships  RestaurantMembership[]
 
   @@map("restaurants")
 }
@@ -49,8 +55,8 @@ model Table {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
-  sessions   Session[]
+  restaurant Restaurant  @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  sessions   TableSession[]
 
   @@unique([restaurantId, number])
   @@unique([id, restaurantId])
@@ -94,7 +100,11 @@ model Product {
   @@map("products")
 }
 
-model Session {
+// Sessao do restaurante (mesa): fluxo do cliente na mesa (etapas 1-10).
+// Renomeado de "Session" para "TableSession" para liberar o nome Session do
+// Better Auth (modelo de sessao de autenticacao). A tabela fisica continua
+// "sessions" — nenhum dado existente e alterado.
+model TableSession {
   id           String        @id @default(uuid()) @db.Uuid
   restaurantId String        @db.Uuid
   tableId      String        @db.Uuid
@@ -117,9 +127,9 @@ model Order {
   id                 String      @id @default(uuid()) @db.Uuid
   sessionId          String      @db.Uuid
   restaurantId       String      @db.Uuid
-  // Chave de idempotencia fornecida pelo cliente, unica por Session.
-  // Escopo multi-tenant preservado: a Session ja e tenant-scoped pelas FKs
-  // compostas (sessionId, restaurantId) -> sessions(id, restaurantId) e
+  // Chave de idempotencia fornecida pelo cliente, unica por TableSession.
+  // Escopo multi-tenant preservado: a TableSession ja e tenant-scoped pelas
+  // FKs compostas (sessionId, restaurantId) -> sessions(id, restaurantId) e
   // (tableId, restaurantId) -> tables(id, restaurantId).
   idempotencyKey     String      @db.Uuid
   // SHA-256 hex do payload normalizado (productIds somados + ordenados).
@@ -129,7 +139,7 @@ model Order {
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 
-  session Session     @relation(fields: [sessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  session TableSession @relation(fields: [sessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
   items   OrderItem[]
 
   @@unique([id, restaurantId])
@@ -155,4 +165,96 @@ model OrderItem {
   @@index([orderId])
   @@index([productId])
   @@map("order_items")
+}
+
+// ---------- Better Auth (Etapa 11) ----------
+// Modelos exigidos pela versao atual do Better Auth (1.7.4) com o adapter
+// Prisma. O CLI oficial (auth generate) gerou estes modelos; foram revisados.
+// A tabela de sessao de autenticacao usa a tabela "session" (separada de
+// "sessions", que e a sessao de mesa da aplicacao).
+
+model User {
+  id            String    @id
+  name          String
+  email         String
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  memberships   RestaurantMembership[]
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id         String   @id
+  token      String   @unique
+  userId     String
+  expiresAt  DateTime
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ---------- Vinculo operador <-> restaurante (Etapa 11) ----------
+// Um usuario pode participar de varios restaurantes; o vinculo e por entidade
+// separada (nao um campo restaurantId no User).
+model RestaurantMembership {
+  id           String         @id @default(uuid()) @db.Uuid
+  userId       String
+  restaurantId String         @db.Uuid
+  role         MembershipRole @default(OPERATOR)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  // onDelete: Cascade no usuario (remover usuario limpa seu vinculo);
+  // onDelete: Restrict no restaurante (mesma politica de tenant das demais
+  // FKs da aplicacao: nao destruir dados de operadores ao apagar tenant).
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, restaurantId])
+  @@index([restaurantId])
+  @@map("restaurant_memberships")
 }

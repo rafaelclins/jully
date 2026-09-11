@@ -2,8 +2,8 @@ import { z } from "zod";
 
 import { OrderStatus } from "@/generated/prisma/client";
 import { errorResponse } from "@/lib/public-api";
+import { requireRestaurantAccess } from "@/lib/require-restaurant-access";
 import { updateOrderStatus } from "@/services/orders";
-import { getRestaurantBySlug } from "@/services/restaurants";
 
 const slugSchema = z
   .string()
@@ -29,10 +29,12 @@ const statusBodySchema = z
   .strict();
 
 // PATCH /api/restaurant/[restaurantSlug]/orders/[orderId]/status
-// Transicao condicional e tenant-scoped. Confirmadas:
-//   PENDING -> PREPARING
-//   PREPARING -> READY
-// Qualquer outra transicao e rejeitada no backend (maquina de estados).
+// Transicao condicional, tenant-scoped e restrita a operador autenticado com
+// membership no restaurante.
+//   - sem sessao          -> 401 UNAUTHORIZED
+//   - restaurante inexistente OU sem membership -> 404 RESTAURANT_NOT_FOUND
+//   - pedido inexistente/cross-tenant do mesmo operador -> 404 ORDER_NOT_FOUND
+// Confirmadas: PENDING -> PREPARING e PREPARING -> READY.
 export async function PATCH(
   request: Request,
   {
@@ -51,8 +53,11 @@ export async function PATCH(
     return errorResponse(400, "Invalid order id");
   }
 
-  const restaurant = await getRestaurantBySlug(parsedSlug.data);
-  if (!restaurant) {
+  const access = await requireRestaurantAccess(parsedSlug.data);
+  if (!access.ok && access.reason === "unauthenticated") {
+    return errorResponse(401, "Unauthorized");
+  }
+  if (!access.ok) {
     return errorResponse(404, "Restaurant not found", "RESTAURANT_NOT_FOUND");
   }
 
@@ -71,7 +76,7 @@ export async function PATCH(
   let result: Awaited<ReturnType<typeof updateOrderStatus>>;
   try {
     result = await updateOrderStatus({
-      restaurantId: restaurant.id,
+      restaurantId: access.context.restaurantId,
       orderId: parsedOrderId.data,
       status: parsedBody.data.status,
     });
