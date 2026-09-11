@@ -21,6 +21,7 @@ export function CategorySection({ id, name, products }: CategorySectionProps) {
           {products.map((product) => (
             <ProductCard
               key={product.id}
+              productId={product.id}
               name={product.name}
               description={product.description}
               price={product.price}

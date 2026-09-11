@@ -1,3 +1,6 @@
+import { CartBar } from "@/components/cart/cart-bar";
+import { CartProvider } from "@/components/cart/cart-provider";
+import { CartView } from "@/components/cart/cart-view";
 import { CategorySection } from "@/components/menu/category-section";
 import { RestaurantHeader } from "@/components/menu/restaurant-header";
 import { StatusMessage } from "@/components/menu/status-message";
@@ -102,30 +105,34 @@ export default async function PublicMenuPage({ params }: PublicMenuPageProps) {
   );
 
   return (
-    <main className="min-h-dvh bg-zinc-50">
-      {header}
-      {visibleCategories.length === 0 ? (
-        <section className="px-6 pt-8 pb-12">
-          <CenteredStatus
-            title="O cardápio ainda não possui itens disponíveis."
-            description="Em breve, novidades por aqui."
-          />
-        </section>
-      ) : (
-        <section
-          aria-label="Cardápio"
-          className="mx-auto w-full max-w-md space-y-8 px-4 pt-6 pb-12"
-        >
-          {visibleCategories.map((category) => (
-            <CategorySection
-              key={category.id}
-              id={category.id}
-              name={category.name}
-              products={category.products}
+    <CartProvider contextId={qrToken}>
+      <main className="min-h-dvh bg-zinc-50">
+        {header}
+        {visibleCategories.length === 0 ? (
+          <section className="px-6 pt-8 pb-12">
+            <CenteredStatus
+              title="O cardápio ainda não possui itens disponíveis."
+              description="Em breve, novidades por aqui."
             />
-          ))}
-        </section>
-      )}
-    </main>
+          </section>
+        ) : (
+          <section
+            aria-label="Cardápio"
+            className="mx-auto w-full max-w-md space-y-8 px-4 pt-6 pb-32"
+          >
+            {visibleCategories.map((category) => (
+              <CategorySection
+                key={category.id}
+                id={category.id}
+                name={category.name}
+                products={category.products}
+              />
+            ))}
+          </section>
+        )}
+        <CartBar />
+        <CartView />
+      </main>
+    </CartProvider>
   );
 }
