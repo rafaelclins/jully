@@ -28,6 +28,13 @@ const createOrderBodySchema = z
   })
   .strict();
 
+const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .uuid();
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ qrToken: string }> }
@@ -37,6 +44,15 @@ export async function POST(
   const parsedToken = qrTokenSchema.safeParse(qrToken);
   if (!parsedToken.success) {
     return errorResponse(400, "Invalid table token");
+  }
+
+  const idempotencyHeader = request.headers.get("Idempotency-Key");
+  const parsedKey = idempotencyKeySchema.safeParse(idempotencyHeader);
+  if (!parsedKey.success) {
+    return errorResponse(
+      400,
+      "Missing or invalid Idempotency-Key header"
+    );
   }
 
   let body: unknown;
@@ -57,6 +73,7 @@ export async function POST(
   try {
     result = await createOrderForTableQrToken(
       parsedToken.data,
+      parsedKey.data,
       parsedBody.data.items
     );
   } catch (error) {
@@ -85,7 +102,15 @@ export async function POST(
         "Item quantity exceeds the allowed limit",
         "QUANTITY_OVER_LIMIT"
       );
+    case "idempotency-conflict":
+      return errorResponse(
+        409,
+        "Não foi possível confirmar este envio. Tente novamente.",
+        "IDEMPOTENCY_CONFLICT"
+      );
     case "created":
       return Response.json({ order: result.order }, { status: 201 });
+    case "replayed":
+      return Response.json({ order: result.order }, { status: 200 });
   }
 }

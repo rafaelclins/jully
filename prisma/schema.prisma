@@ -114,17 +114,26 @@ model Session {
 }
 
 model Order {
-  id           String      @id @default(uuid()) @db.Uuid
-  sessionId    String      @db.Uuid
-  restaurantId String      @db.Uuid
-  status       OrderStatus @default(PENDING)
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  id                 String      @id @default(uuid()) @db.Uuid
+  sessionId          String      @db.Uuid
+  restaurantId       String      @db.Uuid
+  // Chave de idempotencia fornecida pelo cliente, unica por Session.
+  // Escopo multi-tenant preservado: a Session ja e tenant-scoped pelas FKs
+  // compostas (sessionId, restaurantId) -> sessions(id, restaurantId) e
+  // (tableId, restaurantId) -> tables(id, restaurantId).
+  idempotencyKey     String      @db.Uuid
+  // SHA-256 hex do payload normalizado (productIds somados + ordenados).
+  // Um pedido replaido deve ter exatamente o mesmo fingerprint.
+  requestFingerprint String
+  status             OrderStatus @default(PENDING)
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   session Session     @relation(fields: [sessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
   items   OrderItem[]
 
   @@unique([id, restaurantId])
+  @@unique([sessionId, idempotencyKey])
   @@index([sessionId])
   @@index([status])
   @@map("orders")

@@ -14,6 +14,8 @@ type CartViewProps = {
   qrToken: string;
 };
 
+type PendingAttempt = { key: string; signature: string };
+
 function friendlyErrorMessage(status: number, code?: string): string {
   if (code === "TABLE_NOT_FOUND" || status === 404) {
     return "Este QR Code não é válido.";
@@ -24,10 +26,22 @@ function friendlyErrorMessage(status: number, code?: string): string {
   if (code === "MENU_CHANGED") {
     return "O cardápio mudou. Revise seu carrinho e tente novamente.";
   }
+  if (code === "IDEMPOTENCY_CONFLICT") {
+    return "Não foi possível confirmar este envio. Tente novamente.";
+  }
   if (code === "QUANTITY_OVER_LIMIT" || status === 400) {
     return "Não foi possível enviar o pedido. Revise os itens e tente novamente.";
   }
   return "Não foi possível enviar o pedido. Tente novamente em instantes.";
+}
+
+// Assinatura logica do carrinho: independente da ordem dos itens.
+// Mudou o carrinho, mudou a assinatura, e a tentativa pendente e invalidada.
+function cartSignature(items: { productId: string; quantity: number }[]): string {
+  return items
+    .map((item) => `${item.productId}:${item.quantity}`)
+    .sort()
+    .join("|");
 }
 
 export function CartView({ qrToken }: CartViewProps) {
@@ -37,6 +51,7 @@ export function CartView({ qrToken }: CartViewProps) {
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const submittingRef = useRef(false);
+  const attemptRef = useRef<PendingAttempt | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -69,10 +84,27 @@ export function CartView({ qrToken }: CartViewProps) {
     setSubmitting(true);
     setFeedback(null);
 
+    const signature = cartSignature(items);
+    let key: string;
+    if (
+      attemptRef.current &&
+      attemptRef.current.signature === signature
+    ) {
+      key = attemptRef.current.key;
+    } else {
+      // Tentativa logica nova (ou carrinho alterado apos falha):
+      // gera/renova a chave de idempotencia uma unica vez.
+      key = crypto.randomUUID();
+      attemptRef.current = { key, signature };
+    }
+
     try {
       const response = await fetch(`/api/public/tables/${qrToken}/orders`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": key,
+        },
         body: JSON.stringify({
           items: items.map((item) => ({
             productId: item.productId,
@@ -93,6 +125,8 @@ export function CartView({ qrToken }: CartViewProps) {
         return;
       }
 
+      // Sucesso confirmado (201 criado ou 200 replay): encerra a tentativa.
+      attemptRef.current = null;
       clearCart();
       setFeedback({ kind: "success" });
     } catch {

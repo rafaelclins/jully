@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getOrCreateOpenSessionForTable } from "@/services/sessions";
@@ -26,6 +28,8 @@ export type CreatedOrderDto = {
 
 export type CreateOrderResult =
   | { outcome: "created"; order: CreatedOrderDto }
+  | { outcome: "replayed"; order: CreatedOrderDto }
+  | { outcome: "idempotency-conflict" }
   | { outcome: "table-not-found" }
   | { outcome: "table-inactive" }
   | { outcome: "menu-changed" }
@@ -51,6 +55,18 @@ function normalizeQuantities(
       quantity,
     })),
   };
+}
+
+export function computeRequestFingerprint(
+  entries: CreateOrderInputItem[]
+): string {
+  const canonical = [...entries]
+    .sort((a, b) =>
+      a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0
+    )
+    .map((entry) => `${entry.productId}:${entry.quantity}`)
+    .join("|");
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 export const orderPublicSelect = {
@@ -110,8 +126,34 @@ export async function listOrdersBySessionId({
   });
 }
 
+const orderForReplaySelect = {
+  ...orderWithItemsSelect,
+  requestFingerprint: true,
+} satisfies Prisma.OrderSelect;
+
+function toCreatedOrderDto(order: OrderWithItems): CreatedOrderDto {
+  const subtotal = order.items.reduce(
+    (acc, item) => acc.add(item.subtotal),
+    new Prisma.Decimal(0)
+  );
+  return {
+    id: order.id,
+    status: order.status,
+    createdAt: order.createdAt,
+    items: order.items.map((item) => ({
+      productId: item.productId,
+      productName: item.productName,
+      unitPrice: item.unitPrice.toFixed(2),
+      quantity: item.quantity,
+      subtotal: item.subtotal.toFixed(2),
+    })),
+    subtotal: subtotal.toFixed(2),
+  };
+}
+
 export async function createOrderForTableQrToken(
   qrToken: string,
+  idempotencyKey: string,
   items: CreateOrderInputItem[]
 ): Promise<CreateOrderResult> {
   const table = await getTableByQrToken(qrToken);
@@ -129,10 +171,33 @@ export async function createOrderForTableQrToken(
     return { outcome: "quantity-over-limit" };
   }
 
+  const fingerprint = computeRequestFingerprint(normalized.entries);
+
   const { session } = await getOrCreateOpenSessionForTable({
     restaurantId,
     tableId: table.id,
   });
+
+  const replayExisting = async (): Promise<
+    CreateOrderResult | "missing"
+  > => {
+    const existing = await prisma.order.findFirst({
+      where: { sessionId: session.id, idempotencyKey, restaurantId },
+      select: orderForReplaySelect,
+    });
+    if (!existing) {
+      return "missing";
+    }
+    if (existing.requestFingerprint !== fingerprint) {
+      return { outcome: "idempotency-conflict" };
+    }
+    return { outcome: "replayed", order: toCreatedOrderDto(existing) };
+  };
+
+  const fastPath = await replayExisting();
+  if (fastPath !== "missing") {
+    return fastPath;
+  }
 
   const productIds = normalized.entries.map((entry) => entry.productId);
   const products = await prisma.product.findMany({
@@ -143,61 +208,59 @@ export async function createOrderForTableQrToken(
   }
   const productsById = new Map(products.map((product) => [product.id, product]));
 
-  const { order, orderItems } = await prisma.$transaction(async (tx) => {
-    const createdOrder = await tx.order.create({
-      data: {
-        sessionId: session.id,
-        restaurantId,
-      },
-    });
-
-    await tx.orderItem.createMany({
-      data: normalized.entries.map((entry) => {
-        const product = productsById.get(entry.productId);
-        if (!product) {
-          throw new Error(
-            `Product ${entry.productId} resolved but missing after lookup`
-          );
-        }
-        return {
-          orderId: createdOrder.id,
-          productId: product.id,
+  try {
+    const createdId = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.create({
+        data: {
+          sessionId: session.id,
           restaurantId,
-          productName: product.name,
-          unitPrice: product.price,
-          quantity: entry.quantity,
-          subtotal: product.price.mul(entry.quantity),
-        };
-      }),
+          idempotencyKey,
+          requestFingerprint: fingerprint,
+        },
+        select: { id: true },
+      });
+
+      await tx.orderItem.createMany({
+        data: normalized.entries.map((entry) => {
+          const product = productsById.get(entry.productId);
+          if (!product) {
+            throw new Error(
+              `Product ${entry.productId} resolved but missing after lookup`
+            );
+          }
+          return {
+            orderId: order.id,
+            productId: product.id,
+            restaurantId,
+            productName: product.name,
+            unitPrice: product.price,
+            quantity: entry.quantity,
+            subtotal: product.price.mul(entry.quantity),
+          };
+        }),
+      });
+
+      return order.id;
     });
 
-    const createdItems = await tx.orderItem.findMany({
-      where: { orderId: createdOrder.id, restaurantId },
-      orderBy: { productName: "asc" },
+    const full = await prisma.order.findFirst({
+      where: { id: createdId, restaurantId },
+      select: orderWithItemsSelect,
     });
-
-    return { order: createdOrder, orderItems: createdItems };
-  });
-
-  const subtotal = orderItems.reduce(
-    (acc, item) => acc.add(item.subtotal),
-    new Prisma.Decimal(0)
-  );
-
-  return {
-    outcome: "created",
-    order: {
-      id: order.id,
-      status: order.status,
-      createdAt: order.createdAt,
-      items: orderItems.map((item) => ({
-        productId: item.productId,
-        productName: item.productName,
-        unitPrice: item.unitPrice.toFixed(2),
-        quantity: item.quantity,
-        subtotal: item.subtotal.toFixed(2),
-      })),
-      subtotal: subtotal.toFixed(2),
-    },
-  };
+    if (!full) {
+      throw new Error("Created order not found for DTO");
+    }
+    return { outcome: "created", order: toCreatedOrderDto(full) };
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      const raced = await replayExisting();
+      if (raced !== "missing") {
+        return raced;
+      }
+    }
+    throw error;
+  }
 }
