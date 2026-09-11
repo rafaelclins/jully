@@ -36,7 +36,6 @@ model Restaurant {
 
   tables     Table[]
   categories Category[]
-  sessions   Session[]
 
   @@map("restaurants")
 }
@@ -54,6 +53,7 @@ model Table {
   sessions   Session[]
 
   @@unique([restaurantId, number])
+  @@unique([id, restaurantId])
   @@map("tables")
 }
 
@@ -70,23 +70,26 @@ model Category {
   products   Product[]
 
   @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
   @@map("categories")
 }
 
 model Product {
-  id          String   @id @default(uuid()) @db.Uuid
-  categoryId  String   @db.Uuid
-  name        String
-  description String?
-  price       Decimal  @db.Decimal(10, 2)
-  image       String?
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String   @id @default(uuid()) @db.Uuid
+  categoryId   String   @db.Uuid
+  restaurantId String   @db.Uuid
+  name         String
+  description  String?
+  price        Decimal  @db.Decimal(10, 2)
+  image        String?
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  category   Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  category   Category    @relation(fields: [categoryId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
   orderItems OrderItem[]
 
+  @@unique([id, restaurantId])
   @@index([categoryId])
   @@map("products")
 }
@@ -101,41 +104,44 @@ model Session {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
-  table      Table      @relation(fields: [tableId], references: [id], onDelete: Restrict)
-  orders     Order[]
+  table  Table   @relation(fields: [tableId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  orders Order[]
 
+  @@unique([id, restaurantId])
   @@index([restaurantId])
   @@index([tableId])
   @@map("sessions")
 }
 
 model Order {
-  id        String      @id @default(uuid()) @db.Uuid
-  sessionId String      @db.Uuid
-  status    OrderStatus @default(PENDING)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  id           String      @id @default(uuid()) @db.Uuid
+  sessionId    String      @db.Uuid
+  restaurantId String      @db.Uuid
+  status       OrderStatus @default(PENDING)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 
-  session Session     @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  session Session     @relation(fields: [sessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
   items   OrderItem[]
 
+  @@unique([id, restaurantId])
   @@index([sessionId])
   @@index([status])
   @@map("orders")
 }
 
 model OrderItem {
-  id          String  @id @default(uuid()) @db.Uuid
-  orderId     String  @db.Uuid
-  productId   String  @db.Uuid
-  productName String
-  unitPrice   Decimal @db.Decimal(10, 2)
-  quantity    Int     @default(1)
-  subtotal    Decimal @db.Decimal(10, 2)
+  id           String  @id @default(uuid()) @db.Uuid
+  orderId      String  @db.Uuid
+  productId    String  @db.Uuid
+  restaurantId String  @db.Uuid
+  productName  String
+  unitPrice    Decimal @db.Decimal(10, 2)
+  quantity     Int     @default(1)
+  subtotal     Decimal @db.Decimal(10, 2)
 
-  order   Order   @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  order   Order   @relation(fields: [orderId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  product Product @relation(fields: [productId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
 
   @@index([orderId])
   @@index([productId])
