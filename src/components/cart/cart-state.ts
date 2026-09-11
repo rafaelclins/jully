@@ -23,6 +23,7 @@ export type CartAction =
   | { type: "INCREMENT_ITEM"; contextId: CartContextId; productId: string }
   | { type: "DECREMENT_ITEM"; contextId: CartContextId; productId: string }
   | { type: "REMOVE_ITEM"; contextId: CartContextId; productId: string }
+  | { type: "CLEAR_CART"; contextId: CartContextId }
   | { type: "OPEN_CART" }
   | { type: "CLOSE_CART" };
 
@@ -106,6 +107,12 @@ export function cartReducer(
       const nextCart = { ...cart };
       delete nextCart[action.productId];
       return { ...state, carts: { ...state.carts, [action.contextId]: nextCart } };
+    }
+    case "CLEAR_CART": {
+      if (!state.carts[action.contextId]) return state;
+      const nextCarts = { ...state.carts };
+      delete nextCarts[action.contextId];
+      return { ...state, carts: nextCarts };
     }
     case "OPEN_CART":
       return { ...state, isOpen: true };

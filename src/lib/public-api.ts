@@ -31,7 +31,11 @@ export function toRestaurantDto(
 
 export function errorResponse(
   status: number,
-  message: string
+  message: string,
+  code?: string
 ): Response {
-  return Response.json({ error: message }, { status });
+  return Response.json(
+    code ? { error: message, code } : { error: message },
+    { status }
+  );
 }

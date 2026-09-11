@@ -50,7 +50,7 @@ export type OpenSessionResult =
   | { outcome: "table-not-found" }
   | { outcome: "table-inactive" };
 
-async function getOrCreateOpenSessionForTable({
+export async function getOrCreateOpenSessionForTable({
   restaurantId,
   tableId,
 }: {

@@ -131,7 +131,7 @@ export default async function PublicMenuPage({ params }: PublicMenuPageProps) {
           </section>
         )}
         <CartBar />
-        <CartView />
+        <CartView qrToken={qrToken} />
       </main>
     </CartProvider>
   );

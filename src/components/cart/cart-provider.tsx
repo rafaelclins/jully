@@ -27,6 +27,7 @@ type CartContextValue = {
   incrementItem: (productId: string) => void;
   decrementItem: (productId: string) => void;
   removeItem: (productId: string) => void;
+  clearCart: () => void;
   openCart: () => void;
   closeCart: () => void;
 };
@@ -56,6 +57,7 @@ export function CartProvider({ contextId, children }: CartProviderProps) {
         dispatch({ type: "DECREMENT_ITEM", contextId, productId }),
       removeItem: (productId: string) =>
         dispatch({ type: "REMOVE_ITEM", contextId, productId }),
+      clearCart: () => dispatch({ type: "CLEAR_CART", contextId }),
       openCart: () => dispatch({ type: "OPEN_CART" }),
       closeCart: () => dispatch({ type: "CLOSE_CART" }),
     };
