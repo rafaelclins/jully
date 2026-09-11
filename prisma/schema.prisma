@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -10,4 +8,136 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+enum SessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum OrderStatus {
+  PENDING
+  PREPARING
+  READY
+  CANCELLED
+}
+
+model Restaurant {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String
+  slug             String   @unique
+  logo             String?
+  primaryColor     String?
+  secondaryColor   String?
+  address          String?
+  serviceFeePercent Decimal @default(0) @db.Decimal(5, 2)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tables     Table[]
+  categories Category[]
+  sessions   Session[]
+
+  @@map("restaurants")
+}
+
+model Table {
+  id           String   @id @default(uuid()) @db.Uuid
+  restaurantId String   @db.Uuid
+  number       Int
+  qrToken      String   @unique
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  sessions   Session[]
+
+  @@unique([restaurantId, number])
+  @@map("tables")
+}
+
+model Category {
+  id           String   @id @default(uuid()) @db.Uuid
+  restaurantId String   @db.Uuid
+  name         String
+  position     Int      @default(0)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  products   Product[]
+
+  @@unique([restaurantId, name])
+  @@map("categories")
+}
+
+model Product {
+  id          String   @id @default(uuid()) @db.Uuid
+  categoryId  String   @db.Uuid
+  name        String
+  description String?
+  price       Decimal  @db.Decimal(10, 2)
+  image       String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  category   Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  orderItems OrderItem[]
+
+  @@index([categoryId])
+  @@map("products")
+}
+
+model Session {
+  id           String        @id @default(uuid()) @db.Uuid
+  restaurantId String        @db.Uuid
+  tableId      String        @db.Uuid
+  status       SessionStatus @default(OPEN)
+  openedAt     DateTime      @default(now())
+  closedAt     DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  table      Table      @relation(fields: [tableId], references: [id], onDelete: Restrict)
+  orders     Order[]
+
+  @@index([restaurantId])
+  @@index([tableId])
+  @@map("sessions")
+}
+
+model Order {
+  id        String      @id @default(uuid()) @db.Uuid
+  sessionId String      @db.Uuid
+  status    OrderStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  session Session     @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  items   OrderItem[]
+
+  @@index([sessionId])
+  @@index([status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id          String  @id @default(uuid()) @db.Uuid
+  orderId     String  @db.Uuid
+  productId   String  @db.Uuid
+  productName String
+  unitPrice   Decimal @db.Decimal(10, 2)
+  quantity    Int     @default(1)
+  subtotal    Decimal @db.Decimal(10, 2)
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
 }
