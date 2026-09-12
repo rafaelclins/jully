@@ -22,6 +22,7 @@ export const tableWithRestaurantSelect = {
       id: true,
       name: true,
       slug: true,
+      currency: true,
       logo: true,
       primaryColor: true,
       secondaryColor: true,

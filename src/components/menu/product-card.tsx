@@ -10,6 +10,7 @@ type ProductCardProps = {
   description: string | null;
   price: Prisma.Decimal;
   image: string | null;
+  currency: string;
 };
 
 export function ProductCard({
@@ -18,6 +19,7 @@ export function ProductCard({
   description,
   price,
   image,
+  currency,
 }: ProductCardProps) {
   const unitPriceCents = priceStringToCents(price.toFixed(2));
 
@@ -50,7 +52,7 @@ export function ProductCard({
           </p>
         ) : null}
         <p className="mt-3 text-base font-bold text-zinc-900">
-          {formatPrice(price)}
+          {formatPrice(price, currency)}
         </p>
       </div>
     </li>

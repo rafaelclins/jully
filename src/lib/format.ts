@@ -1,10 +1,11 @@
 import type { Prisma } from "@/generated/prisma/client";
+import { formatCurrencyDecimal } from "@/lib/money/currency";
 
-const brlFormatter = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL",
-});
-
-export function formatPrice(value: Prisma.Decimal): string {
-  return brlFormatter.format(value.toNumber());
+// Formata um Decimal exato como moeda do restaurante (iso 4217). NUNCA usa
+// símbolo manual; a apresentação fica a cargo de Intl.NumberFormat.
+export function formatPrice(
+  value: Prisma.Decimal,
+  currency: string
+): string {
+  return formatCurrencyDecimal(value.toFixed(2), currency);
 }

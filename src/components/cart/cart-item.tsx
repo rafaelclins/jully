@@ -2,14 +2,14 @@
 
 import { useCart } from "@/components/cart/cart-provider";
 import type { CartLine } from "@/components/cart/cart-state";
-import { formatMoneyCents } from "@/lib/money";
+import { formatCurrencyCents } from "@/lib/money/currency";
 
 type CartItemProps = {
   line: CartLine;
 };
 
 export function CartItem({ line }: CartItemProps) {
-  const { incrementItem, decrementItem, removeItem } = useCart();
+  const { incrementItem, decrementItem, removeItem, currency } = useCart();
 
   const lineSubtotalCents = line.unitPriceCents * line.quantity;
 
@@ -20,7 +20,7 @@ export function CartItem({ line }: CartItemProps) {
           {line.name}
         </h2>
         <p className="shrink-0 text-sm font-bold text-zinc-900">
-          {formatMoneyCents(lineSubtotalCents)}
+          {formatCurrencyCents(lineSubtotalCents, currency)}
         </p>
       </div>
       <div className="mt-3 flex items-center justify-between gap-3">
@@ -57,7 +57,7 @@ export function CartItem({ line }: CartItemProps) {
         </button>
       </div>
       <p className="mt-1 text-xs text-zinc-500">
-        {formatMoneyCents(line.unitPriceCents)} por unidade
+        {formatCurrencyCents(line.unitPriceCents, currency)} por unidade
       </p>
     </li>
   );

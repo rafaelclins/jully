@@ -1,9 +1,11 @@
 import {
   OrderStatus,
+  PaymentStatus,
   Prisma,
   SessionStatus,
 } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { assertSupportedCurrency } from "@/lib/money/currency";
 import { getRestaurantById } from "@/services/restaurants";
 import { getTableByQrToken } from "@/services/tables";
 
@@ -44,12 +46,20 @@ const summarySessionSelect = {
   status: true,
   openedAt: true,
   closedAt: true,
-  // Snapshots financeiros (Etapa 14): NULL enquanto OPEN; preenchidos e
-  // imutaveis a partir do fechamento.
+  // Snapshots financeiros (Etapa 14 + 15): NULL enquanto OPEN; preenchidos e
+  // imutaveis a partir do fechamento (inclusive a moeda congelada).
   closedSubtotal: true,
   serviceFeePercentSnapshot: true,
   closedServiceFeeAmount: true,
   closedTotal: true,
+  currencySnapshot: true,
+  // Contagem de pagamentos efetivamente PAID (0 ou 1): SEM ler a tabela toda;
+  // "UNPAID" é a ausência derivada de Payment PAID — nunca uma row artificial.
+  _count: {
+    select: {
+      payments: { where: { status: PaymentStatus.PAID } },
+    },
+  },
   table: { select: { id: true, number: true } },
 } satisfies Prisma.TableSessionSelect;
 
@@ -91,10 +101,21 @@ export type SessionSummaryDto = {
       subtotal: string;
     }[];
   }[];
+  // Moeda apresentada/operacional da conta:
+  //   - Session CLOSED -> currencySnapshot (congelada, imutavel);
+  //   - Session OPEN   -> Restaurant.currency (estimativa viva).
+  currency: string;
   subtotal: string;
   serviceFeePercent: string;
   serviceFeeAmount: string;
   total: string;
+  // Estado de pagamento derivado (Etapa 15). CLOSED:
+  //   - "UNPAID" quando não existe Payment PAID na Session (tentativas
+  //     PENDING/FAILED/CANCELLED não pagam a conta);
+  //   - "PAID" quando existe exatamente um Payment PAID (garantido pelo índice
+  //     parcial payments_one_paid_per_session).
+  // OPEN: sempre null (a conta ainda não é pagável).
+  payment: { status: "UNPAID" | "PAID" } | null;
 };
 
 type SummarySessionRow = Prisma.TableSessionGetPayload<{
@@ -141,24 +162,28 @@ function buildSummaryDto(
 
   // Financeiro:
   //   - Session OPEN: estimativa viva (subtotal dos OrderItem historicos +
-  //     taxa atual do Restaurant). Snapshots sao NULL.
+  //     taxa atual do Restaurant). Snapshots sao NULL. Moeda = Restaurant.currency.
   //   - Session CLOSED: exclusivamente os snapshots gravados no fechamento.
   //     NUNCA recalcula com configuracao/dados atuais. Se algum snapshot
   //     estiver NULL (base legada pre-CHECK, restauracao corrompida, SQL
   //     manual), e violacao de integridade: lanca SessionSummaryIntegrityError
   //     em vez de transformar dado corrompido em valor financeiro aparentemente
-  //     valido (nunca responde 200 com valores estimados).
+  //     valido (nunca responde 200 com valores estimados). Moeda =
+  //     currencySnapshot (congelada no fechamento).
   let subtotal: Prisma.Decimal;
   let serviceFeePercent: Prisma.Decimal;
   let serviceFeeAmount: Prisma.Decimal;
   let total: Prisma.Decimal;
+  let currency: string;
+  let payment: { status: "UNPAID" | "PAID" } | null;
 
   if (session.status === SessionStatus.CLOSED) {
     if (
       session.closedSubtotal === null ||
       session.serviceFeePercentSnapshot === null ||
       session.closedServiceFeeAmount === null ||
-      session.closedTotal === null
+      session.closedTotal === null ||
+      session.currencySnapshot === null
     ) {
       throw new SessionSummaryIntegrityError(
         `session ${session.id} is CLOSED but financial snapshot is incomplete`
@@ -168,6 +193,9 @@ function buildSummaryDto(
     serviceFeePercent = session.serviceFeePercentSnapshot;
     serviceFeeAmount = session.closedServiceFeeAmount;
     total = session.closedTotal;
+    currency = session.currencySnapshot;
+    payment =
+      session._count.payments > 0 ? { status: "PAID" } : { status: "UNPAID" };
   } else {
     subtotal = sumOrderItemsSubtotal(orders);
     serviceFeePercent = restaurant.serviceFeePercent;
@@ -176,6 +204,8 @@ function buildSummaryDto(
       .div(100)
       .toDecimalPlaces(2, SERVICE_FEE_ROUNDING);
     total = subtotal.add(serviceFeeAmount);
+    currency = restaurant.currency;
+    payment = null;
   }
 
   return {
@@ -192,10 +222,12 @@ function buildSummaryDto(
       slug: restaurant.slug,
     },
     orders: orderDtos,
+    currency,
     subtotal: subtotal.toFixed(2),
     serviceFeePercent: serviceFeePercent.toFixed(2),
     serviceFeeAmount: serviceFeeAmount.toFixed(2),
     total: total.toFixed(2),
+    payment,
   };
 }
 
@@ -265,11 +297,12 @@ export type CloseSessionResult =
 // So fecha com status OPEN e sem Order PENDING/PREPARING (READY/CANCELLED nao
 // bloqueiam). A rejeicao e atomica com a mudanca de estado (mesma transacao).
 //
-// Etapa 14: o fechamento grava atomicamente, na MESMA transacao e dentro do
-// lock da Tabela, os snapshots financeiros (closedSubtotal,
-// serviceFeePercentSnapshot, closedServiceFeeAmount e closedTotal). A partir
-// de CLOSED o resumo e imutavel: a configuracao atual do Restaurant e o
-// Product atual NAO influenciam mais o total historico.
+// Etapa 14 + 15: o fechamento grava atomicamente, na MESMA transacao e dentro
+// do lock da Tabela, os snapshots financeiros (closedSubtotal,
+// serviceFeePercentSnapshot, closedServiceFeeAmount, closedTotal e
+// currencySnapshot — a moeda operacional congelada no instante do fechamento).
+// A partir de CLOSED o resumo e imutavel: a configuracao atual do Restaurant
+// e o Product atual NAO influenciam mais o total historico.
 export async function closeSession({
   restaurantId,
   sessionId,
@@ -355,15 +388,17 @@ export async function closeSession({
     }
 
     // 2) taxa: percentual atual do restaurante neste instante (unico momento
-    //    em que a configuracao atual influencia o fechamento).
+    //    em que a configuracao atual influencia o fechamento) + moeda
+    //    operacional, que sera congelada em currencySnapshot.
     const restaurant = await tx.restaurant.findFirst({
       where: { id: restaurantId },
-      select: { serviceFeePercent: true },
+      select: { serviceFeePercent: true, currency: true },
     });
     if (!restaurant) {
       return { outcome: "not-found" as const };
     }
     const serviceFeePercentSnapshot = restaurant.serviceFeePercent;
+    const currencySnapshot = assertSupportedCurrency(restaurant.currency);
 
     // 3) ROUND_HALF_UP de 2 casas sobre subtotal * percent/100 (nunca Float).
     const closedServiceFeeAmount = closedSubtotal
@@ -382,6 +417,7 @@ export async function closeSession({
         serviceFeePercentSnapshot,
         closedServiceFeeAmount,
         closedTotal,
+        currencySnapshot,
       },
     });
     return { outcome: "closed" as const };

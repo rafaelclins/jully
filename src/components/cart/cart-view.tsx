@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 
 import { CartItem } from "@/components/cart/cart-item";
 import { useCart } from "@/components/cart/cart-provider";
-import { formatMoneyCents } from "@/lib/money";
+import { formatCurrencyCents } from "@/lib/money/currency";
 
 type Feedback =
   | { kind: "success" }
@@ -45,8 +45,15 @@ function cartSignature(items: { productId: string; quantity: number }[]): string
 }
 
 export function CartView({ qrToken }: CartViewProps) {
-  const { items, totalItems, subtotalCents, isCartOpen, closeCart, clearCart } =
-    useCart();
+  const {
+    items,
+    totalItems,
+    subtotalCents,
+    currency,
+    isCartOpen,
+    closeCart,
+    clearCart,
+  } = useCart();
 
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -219,7 +226,7 @@ export function CartView({ qrToken }: CartViewProps) {
                   Total · {totalItems} {itemLabel}
                 </p>
                 <p className="text-xl font-bold text-zinc-900">
-                  {formatMoneyCents(subtotalCents)}
+                  {formatCurrencyCents(subtotalCents, currency)}
                 </p>
               </div>
               <button

@@ -1,10 +1,10 @@
 "use client";
 
 import { useCart } from "@/components/cart/cart-provider";
-import { formatMoneyCents } from "@/lib/money";
+import { formatCurrencyCents } from "@/lib/money/currency";
 
 export function CartBar() {
-  const { items, totalItems, subtotalCents, openCart } = useCart();
+  const { items, totalItems, subtotalCents, currency, openCart } = useCart();
 
   if (items.length === 0) {
     return null;
@@ -20,7 +20,7 @@ export function CartBar() {
             Carrinho · {totalItems} {itemLabel}
           </p>
           <p className="text-lg font-bold leading-snug text-zinc-900">
-            {formatMoneyCents(subtotalCents)}
+            {formatCurrencyCents(subtotalCents, currency)}
           </p>
         </div>
         <button

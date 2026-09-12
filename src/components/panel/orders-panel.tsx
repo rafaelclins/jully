@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { authClient } from "@/lib/auth-client";
-import { formatBrzDecimal } from "@/lib/money";
+import { formatCurrencyDecimal } from "@/lib/money/currency";
 
 type PanelOrder = {
   id: string;
@@ -22,6 +22,7 @@ type PanelOrder = {
     subtotal: string;
   }[];
   total: string;
+  currency: string;
 };
 
 const POLL_INTERVAL_MS = 5000;
@@ -83,6 +84,7 @@ export function OrdersPanel({
   const [phase, setPhase] = useState<"loading" | "ready">("loading");
   const [refreshing, setRefreshing] = useState(false);
   const [pollError, setPollError] = useState(false);
+  const [currency, setCurrency] = useState("BRL");
   const [message, setMessage] = useState<{
     kind: "error" | "success";
     text: string;
@@ -119,6 +121,9 @@ const loadOrders = useCallback(async () => {
       }
       const data = (await response.json()) as { orders: PanelOrder[] };
       setOrders(data.orders);
+      if (data.orders.length > 0) {
+        setCurrency(data.orders[0].currency);
+      }
       setLastUpdatedAt(new Date());
       setPollError(false);
       setPhase("ready");
@@ -309,6 +314,7 @@ const loadOrders = useCallback(async () => {
                       <li key={order.id}>
                         <OrderCard
                           order={order}
+                          currency={currency}
                           restaurantSlug={restaurantSlug}
                           busy={busyOrderIds.has(order.id)}
                           onAdvance={() => void advanceStatus(order)}
@@ -328,11 +334,13 @@ const loadOrders = useCallback(async () => {
 
 function OrderCard({
   order,
+  currency,
   restaurantSlug,
   busy,
   onAdvance,
 }: {
   order: PanelOrder;
+  currency: string;
   restaurantSlug: string;
   busy: boolean;
   onAdvance: () => void;
@@ -371,7 +379,7 @@ function OrderCard({
               {item.quantity}×{" "}
             </span>
             {item.productName}
-            <span className="text-zinc-500"> · {formatBrzDecimal(item.subtotal)}</span>
+            <span className="text-zinc-500"> · {formatCurrencyDecimal(item.subtotal, currency)}</span>
           </li>
         ))}
       </ul>
@@ -383,7 +391,7 @@ function OrderCard({
               Total
             </p>
             <p className="text-lg font-bold text-zinc-900">
-              {formatBrzDecimal(order.total)}
+              {formatCurrencyDecimal(order.total, currency)}
             </p>
           </div>
         </div>

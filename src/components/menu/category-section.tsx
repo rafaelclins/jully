@@ -4,10 +4,16 @@ import { ProductCard } from "@/components/menu/product-card";
 type CategorySectionProps = {
   id: string;
   name: string;
+  currency: string;
   products: ActiveMenuCategory["products"];
 };
 
-export function CategorySection({ id, name, products }: CategorySectionProps) {
+export function CategorySection({
+  id,
+  name,
+  currency,
+  products,
+}: CategorySectionProps) {
   return (
     <section aria-labelledby={`category-${id}`}>
       <h2
@@ -26,6 +32,7 @@ export function CategorySection({ id, name, products }: CategorySectionProps) {
               description={product.description}
               price={product.price}
               image={product.image}
+              currency={currency}
             />
           ))}
         </ul>

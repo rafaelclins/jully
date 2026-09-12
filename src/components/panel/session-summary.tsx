@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
-import { formatBrzDecimal } from "@/lib/money";
+import { formatCurrencyDecimal } from "@/lib/money/currency";
 import type { SessionSummaryDto } from "@/services/sessions";
 
 type SessionSummaryViewProps = {
@@ -140,7 +140,7 @@ export function SessionSummaryView({
       <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
         {isClosed ? (
           <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">
-            Mesa fechada
+            Mesa fechada{summary.payment ? ` · ${summary.payment.status === "PAID" ? "paga" : "não paga"}` : ""}
           </div>
         ) : null}
 
@@ -184,7 +184,7 @@ export function SessionSummaryView({
                       </span>
                     </p>
                     <p className="text-lg font-bold text-zinc-900">
-                      {formatBrzDecimal(order.subtotal)}
+                      {formatCurrencyDecimal(order.subtotal, summary.currency)}
                     </p>
                   </div>
                   <ul className="mt-2 space-y-1 text-sm text-zinc-700">
@@ -197,7 +197,7 @@ export function SessionSummaryView({
                           {item.productName}
                         </span>
                         <span className="shrink-0 text-zinc-500">
-                          {formatBrzDecimal(item.subtotal)}
+                          {formatCurrencyDecimal(item.subtotal, summary.currency)}
                         </span>
                       </li>
                     ))}
@@ -213,7 +213,7 @@ export function SessionSummaryView({
             <div className="flex justify-between gap-3">
               <dt className="text-zinc-500">Subtotal</dt>
               <dd className="font-semibold text-zinc-900">
-                {formatBrzDecimal(summary.subtotal)}
+                {formatCurrencyDecimal(summary.subtotal, summary.currency)}
               </dd>
             </div>
             <div className="flex justify-between gap-3">
@@ -221,13 +221,13 @@ export function SessionSummaryView({
                 Taxa de serviço {percentLabel(summary.serviceFeePercent)}%
               </dt>
               <dd className="font-semibold text-zinc-900">
-                {formatBrzDecimal(summary.serviceFeeAmount)}
+                {formatCurrencyDecimal(summary.serviceFeeAmount, summary.currency)}
               </dd>
             </div>
             <div className="flex justify-between gap-3 border-t border-zinc-200 pt-2">
               <dt className="text-base font-bold text-zinc-900">Total</dt>
               <dd className="text-xl font-bold text-zinc-900">
-                {formatBrzDecimal(summary.total)}
+                {formatCurrencyDecimal(summary.total, summary.currency)}
               </dd>
             </div>
           </dl>

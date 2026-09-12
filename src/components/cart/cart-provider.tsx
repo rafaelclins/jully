@@ -22,6 +22,7 @@ type CartContextValue = {
   items: CartLine[];
   totalItems: number;
   subtotalCents: number;
+  currency: string;
   isCartOpen: boolean;
   addItem: (product: AddToCartProduct) => void;
   incrementItem: (productId: string) => void;
@@ -36,10 +37,15 @@ const CartContext = createContext<CartContextValue | null>(null);
 
 type CartProviderProps = {
   contextId: string;
+  currency: string;
   children: ReactNode;
 };
 
-export function CartProvider({ contextId, children }: CartProviderProps) {
+export function CartProvider({
+  contextId,
+  currency,
+  children,
+}: CartProviderProps) {
   const [state, dispatch] = useReducer(cartReducer, CART_INITIAL_STATE);
 
   const value = useMemo<CartContextValue>(() => {
@@ -48,6 +54,7 @@ export function CartProvider({ contextId, children }: CartProviderProps) {
       items: lines,
       totalItems: getTotalItems(lines),
       subtotalCents: getSubtotalCents(lines),
+      currency,
       isCartOpen: state.isOpen,
       addItem: (product: AddToCartProduct) =>
         dispatch({ type: "ADD_ITEM", contextId, product }),
@@ -61,7 +68,7 @@ export function CartProvider({ contextId, children }: CartProviderProps) {
       openCart: () => dispatch({ type: "OPEN_CART" }),
       closeCart: () => dispatch({ type: "CLOSE_CART" }),
     };
-  }, [state, contextId]);
+  }, [state, contextId, currency]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }

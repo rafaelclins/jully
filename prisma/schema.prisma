@@ -27,10 +27,34 @@ enum MembershipRole {
   OPERATOR
 }
 
+// Estado de uma tentativa/registro de pagamento (Etapa 15).
+// O domínio do JULLY é menor que o domínio de qualquer gateway: sem REFUNDED
+// enquanto refund não existir no core. Estados finais (PAID/FAILED/CANCELLED)
+// não retornam para PENDING.
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+}
+
+// Método de pagamento (separado do provedor — veja Payment.provider).
+// Não é um enum rígido de providers; providers futuros ficam em TEXT.
+enum PaymentMethod {
+  PIX
+  CARD
+  CASH
+  OTHER
+}
+
 model Restaurant {
   id                String   @id @default(uuid()) @db.Uuid
   name              String
   slug              String   @unique
+  // Moeda operacional (ISO 4217 uppercase, ex.: "BRL", "USD", "EUR").
+  // Validada no domínio (src/lib/money/currency.ts). One restaurant opera em
+  // uma moeda por vez. Não há câmbio nem multi-currency dentro da conta.
+  currency          String   @default("BRL")
   logo              String?
   primaryColor      String?
   secondaryColor    String?
@@ -111,19 +135,26 @@ model TableSession {
   status       SessionStatus @default(OPEN)
   openedAt     DateTime      @default(now())
   closedAt     DateTime?
-  // ---------- Snapshots financeiros do fechamento (Etapa 14) ----------
-  // NULL enquanto OPEN. Todos os quatro sao gravados atomicamente junto com
-  // status=CLOSED + closedAt. Para CLOSED, o resumo financeiro e imutavel:
-  // nunca mais depende da configuracao atual do Restaurant nem de Product.
+  // ---------- Snapshots financeiros do fechamento (Etapa 14 + 15) ----------
+  // NULL enquanto OPEN. Todos gravados atomicamente junto com status=CLOSED +
+  // closedAt. Para CLOSED, o resumo financeiro é imutável: nunca mais depende
+  // da configuração atual do Restaurant nem de Product.
+  //
+  // currencySnapshot (Etapa 15): congela a moeda operacional do Restaurant no
+  // exato momento do fechamento. Se o Restaurant depois mudar BRL -> USD, as
+  // Sessions CLOSED continuam BRL; a moeda histórica jamais é reinterpretada.
+  // Validada no domínio (src/lib/money/currency.ts) no fechamento.
   closedSubtotal            Decimal? @db.Decimal(10, 2)
   serviceFeePercentSnapshot Decimal? @db.Decimal(5, 2)
   closedServiceFeeAmount    Decimal? @db.Decimal(10, 2)
   closedTotal               Decimal? @db.Decimal(10, 2)
+  currencySnapshot          String?
   createdAt                 DateTime  @default(now())
   updatedAt                 DateTime  @updatedAt
 
-  table  Table   @relation(fields: [tableId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
-  orders Order[]
+  table    Table     @relation(fields: [tableId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  orders   Order[]
+  payments Payment[]
 
   @@unique([id, restaurantId])
   @@index([restaurantId])
@@ -173,6 +204,58 @@ model OrderItem {
   @@index([orderId])
   @@index([productId])
   @@map("order_items")
+}
+
+// ---------- Pagamento (Etapa 15) ----------
+// Tentativa/registro de pagamento relacionado a uma TableSession CLOSED.
+// NÃO representa nenhum gateway específico: a fronteira com provedores
+// (Stripe, Mercado Pago, maquininhas, PIX) é documentada/abstracta, e o campo
+// `provider` (TEXT) recebe o identificador do provedor apenas na integração
+// futura — nunca um enum rígido que gere migration por provedor.
+// Nenhum dado sensível (número de cartão, CVV, senha, chave de gateway) é
+// armazenado — apenas tokens/identificadores seguros do provider quando a
+// integração existir.
+//
+// Semântica:
+//   - amount/currency são DERIVADOS da Session fechada (closedTotal +
+//     currencySnapshot) — o servidor/banco é a fonte da verdade, nunca o
+//     browser;
+//   - uma Session fechada possui no máximo UM pagamento efetivamente PAID
+//     (índice parcial payments_one_paid_per_session — Prisma não expressa
+//     partial unique). Tentativas PENDING/FAILED/CANCELLED podem coexistir;
+//   - idempotência: unique(sessionId, idempotencyKey) — um retry da mesma
+//     intenção nunca cria tentativas equivalentes;
+//   - tenant: FK composta (sessionId, restaurantId) -> sessions(id, restaurantId);
+//   - delete: Restrict — histórico financeiro nunca some em cascade.
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  restaurantId      String        @db.Uuid
+  sessionId         String        @db.Uuid
+  // Total integral da Session fechada (closedTotal). Sem pagamento parcial em
+  // nesta etapa. DECIMAL(10,2) exato, compativel com as moedas iniciais.
+  amount            Decimal       @db.Decimal(10, 2)
+  // Moeda congelada no fechamento: deve ser igual a sessions.currencySnapshot.
+  currency          String
+  status            PaymentStatus @default(PENDING)
+  method            PaymentMethod?
+  provider          String?
+  providerPaymentId String?
+  // Chave de idempotência UUID fornecida pelo cliente/fluxo de integração.
+  idempotencyKey    String        @db.Uuid
+  paidAt            DateTime?
+  failedAt          DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  session TableSession @relation(fields: [sessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+
+  @@unique([id, restaurantId])
+  // Idempotência tenant-safe: a Session já é tenant-scoped pela FK composta.
+  @@unique([sessionId, idempotencyKey])
+  @@index([sessionId])
+  @@index([restaurantId])
+  @@index([status])
+  @@map("payments")
 }
 
 // ---------- Better Auth (Etapa 11) ----------

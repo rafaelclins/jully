@@ -9,6 +9,7 @@ export type RestaurantDto = {
   id: string;
   name: string;
   slug: string;
+  currency: string;
   logo: string | null;
   primaryColor: string | null;
   secondaryColor: string | null;
@@ -22,6 +23,7 @@ export function toRestaurantDto(
     id: restaurant.id,
     name: restaurant.name,
     slug: restaurant.slug,
+    currency: restaurant.currency,
     logo: restaurant.logo,
     primaryColor: restaurant.primaryColor,
     secondaryColor: restaurant.secondaryColor,

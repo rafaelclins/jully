@@ -105,7 +105,7 @@ export default async function PublicMenuPage({ params }: PublicMenuPageProps) {
   );
 
   return (
-    <CartProvider contextId={qrToken}>
+    <CartProvider contextId={qrToken} currency={restaurant.currency}>
       <main className="min-h-dvh bg-zinc-50">
         {header}
         {visibleCategories.length === 0 ? (
@@ -125,6 +125,7 @@ export default async function PublicMenuPage({ params }: PublicMenuPageProps) {
                 key={category.id}
                 id={category.id}
                 name={category.name}
+                currency={restaurant.currency}
                 products={category.products}
               />
             ))}

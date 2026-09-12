@@ -351,10 +351,14 @@ export type OperationalOrderDto = {
     subtotal: string;
   }[];
   total: string;
+  // Moeda operacional do restaurante (orders operacionais estão em Sessions
+  // OPEN; a moeda da conta fechada vem de currencySnapshot).
+  currency: string;
 };
 
 function toOperationalOrderDto(
-  order: OperationalOrderRow
+  order: OperationalOrderRow,
+  currency: string
 ): OperationalOrderDto {
   // Total sempre calculado a partir dos snapshots (OrderItem), nunca do
   // Product atual. Arredondamento Decimal exato, sem Float.
@@ -377,6 +381,7 @@ function toOperationalOrderDto(
       subtotal: item.subtotal.toFixed(2),
     })),
     total: total.toFixed(2),
+    currency,
   };
 }
 
@@ -388,15 +393,22 @@ function toOperationalOrderDto(
 export async function listOperationalOrdersByRestaurantId(
   restaurantId: string
 ): Promise<OperationalOrderDto[]> {
-  const orders = await prisma.order.findMany({
-    where: {
-      restaurantId,
-      status: { in: OPERATIONAL_ORDER_STATUS_LIST },
-    },
-    select: operationalOrderListSelect,
-    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
-  });
-  return orders.map(toOperationalOrderDto);
+  const [orders, restaurant] = await Promise.all([
+    prisma.order.findMany({
+      where: {
+        restaurantId,
+        status: { in: OPERATIONAL_ORDER_STATUS_LIST },
+      },
+      select: operationalOrderListSelect,
+      orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+    }),
+    prisma.restaurant.findFirst({
+      where: { id: restaurantId },
+      select: { currency: true },
+    }),
+  ]);
+  const currency = restaurant?.currency ?? "BRL";
+  return orders.map((order) => toOperationalOrderDto(order, currency));
 }
 
 export type UpdateOrderStatusResult =
