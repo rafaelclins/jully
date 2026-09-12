@@ -33,6 +33,12 @@ const summarySessionSelect = {
   status: true,
   openedAt: true,
   closedAt: true,
+  // Snapshots financeiros (Etapa 14): NULL enquanto OPEN; preenchidos e
+  // imutaveis a partir do fechamento.
+  closedSubtotal: true,
+  serviceFeePercentSnapshot: true,
+  closedServiceFeeAmount: true,
+  closedTotal: true,
   table: { select: { id: true, number: true } },
 } satisfies Prisma.TableSessionSelect;
 
@@ -84,18 +90,29 @@ type SummarySessionRow = Prisma.TableSessionGetPayload<{
   select: typeof summarySessionSelect;
 }>;
 
+function sumOrderItemsSubtotal(
+  orders: Prisma.OrderGetPayload<{ select: typeof summaryOrderSelect }>[]
+): Prisma.Decimal {
+  return orders.reduce(
+    (acc, order) =>
+      order.items.reduce(
+        (itemsAcc, item) => itemsAcc.add(item.subtotal),
+        acc
+      ),
+    new Prisma.Decimal(0)
+  );
+}
+
 function buildSummaryDto(
   session: SummarySessionRow,
   restaurant: NonNullable<Awaited<ReturnType<typeof getRestaurantById>>>,
   orders: Prisma.OrderGetPayload<{ select: typeof summaryOrderSelect }>[]
 ): SessionSummaryDto {
-  let subtotal = new Prisma.Decimal(0);
   const orderDtos = orders.map((order) => {
     const orderSubtotal = order.items.reduce(
       (acc, item) => acc.add(item.subtotal),
       new Prisma.Decimal(0)
     );
-    subtotal = subtotal.add(orderSubtotal);
     return {
       id: order.id,
       status: order.status,
@@ -111,12 +128,32 @@ function buildSummaryDto(
     };
   });
 
-  const serviceFeePercent = restaurant.serviceFeePercent;
-  const serviceFeeAmount = subtotal
+  // Etapa 14: Session CLOSED nunca mais depende da configuracao atual do
+  // Restaurant nem de Product: os quatro valores financeiros vem
+  // exclusivamente dos snapshots persistidos no fechamento. O CHECK
+  // sessions_financial_snapshot_consistency garante que em CLOSED todos os
+  // quatro snapshots existem (defensivamente, se algum estiver NULL em base
+  // legada pre-Check, o calculo cai para o comportamento OPEN/estimativa).
+  let subtotal = sumOrderItemsSubtotal(orders);
+  let serviceFeePercent: Prisma.Decimal = restaurant.serviceFeePercent;
+  let serviceFeeAmount = subtotal
     .mul(serviceFeePercent)
     .div(100)
     .toDecimalPlaces(2, SERVICE_FEE_ROUNDING);
-  const total = subtotal.add(serviceFeeAmount);
+  let total = subtotal.add(serviceFeeAmount);
+
+  if (
+    session.status === SessionStatus.CLOSED &&
+    session.closedSubtotal !== null &&
+    session.serviceFeePercentSnapshot !== null &&
+    session.closedServiceFeeAmount !== null &&
+    session.closedTotal !== null
+  ) {
+    subtotal = session.closedSubtotal;
+    serviceFeePercent = session.serviceFeePercentSnapshot;
+    serviceFeeAmount = session.closedServiceFeeAmount;
+    total = session.closedTotal;
+  }
 
   return {
     session: {
@@ -204,6 +241,12 @@ export type CloseSessionResult =
 // Session ja CLOSED e responde "already-closed" com o MESMO resumo/closedAt.
 // So fecha com status OPEN e sem Order PENDING/PREPARING (READY/CANCELLED nao
 // bloqueiam). A rejeicao e atomica com a mudanca de estado (mesma transacao).
+//
+// Etapa 14: o fechamento grava atomicamente, na MESMA transacao e dentro do
+// lock da Tabela, os snapshots financeiros (closedSubtotal,
+// serviceFeePercentSnapshot, closedServiceFeeAmount e closedTotal). A partir
+// de CLOSED o resumo e imutavel: a configuracao atual do Restaurant e o
+// Product atual NAO influenciam mais o total historico.
 export async function closeSession({
   restaurantId,
   sessionId,
@@ -264,9 +307,59 @@ export async function closeSession({
       return { outcome: "has-orders-in-progress" as const };
     }
 
+    // ---------- Etapa 14: snapshot financeiro imutavel do fechamento ----------
+    // Tudo acontece DENTRO da mesma transacao (regiao serializada pelo lock da
+    // Tabela): a configuracao atual do Restaurant e lida aqui, o subtotal
+    // historico e calculado dos OrderItem.values, e os quatro snapshots sao
+    // persistidos atomicamente junto com status=CLOSED + closedAt.
+    // Ou tudo fecha, ou nada fecha: nao ha gravacao financeira posterior.
+
+    // 1) subtotal historico: soma exata dos OrderItem.subtotal dos pedidos
+    //    financeiros (PENDING/PREPARING/READY); CANCELLED fica de fora.
+    const financialOrders = await tx.order.findMany({
+      where: {
+        sessionId,
+        restaurantId,
+        status: { in: FINANCIAL_ORDER_STATUS_LIST },
+      },
+      select: { items: { select: { subtotal: true } } },
+    });
+    let closedSubtotal = new Prisma.Decimal(0);
+    for (const order of financialOrders) {
+      for (const item of order.items) {
+        closedSubtotal = closedSubtotal.add(item.subtotal);
+      }
+    }
+
+    // 2) taxa: percentual atual do restaurante neste instante (unico momento
+    //    em que a configuracao atual influencia o fechamento).
+    const restaurant = await tx.restaurant.findFirst({
+      where: { id: restaurantId },
+      select: { serviceFeePercent: true },
+    });
+    if (!restaurant) {
+      return { outcome: "not-found" as const };
+    }
+    const serviceFeePercentSnapshot = restaurant.serviceFeePercent;
+
+    // 3) ROUND_HALF_UP de 2 casas sobre subtotal * percent/100 (nunca Float).
+    const closedServiceFeeAmount = closedSubtotal
+      .mul(serviceFeePercentSnapshot)
+      .div(100)
+      .toDecimalPlaces(2, SERVICE_FEE_ROUNDING);
+    const closedTotal = closedSubtotal.add(closedServiceFeeAmount);
+
+    const closedAt = new Date();
     await tx.tableSession.update({
       where: { id: sessionId },
-      data: { status: SessionStatus.CLOSED, closedAt: new Date() },
+      data: {
+        status: SessionStatus.CLOSED,
+        closedAt,
+        closedSubtotal,
+        serviceFeePercentSnapshot,
+        closedServiceFeeAmount,
+        closedTotal,
+      },
     });
     return { outcome: "closed" as const };
   });

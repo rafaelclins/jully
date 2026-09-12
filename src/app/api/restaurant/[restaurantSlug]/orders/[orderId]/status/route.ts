@@ -89,6 +89,12 @@ export async function PATCH(
     case "order-not-found":
       // Tambem cobre pedido de outro tenant: nao confirmar existencia.
       return errorResponse(404, "Order not found", "ORDER_NOT_FOUND");
+    case "session-closed":
+      return errorResponse(
+        409,
+        "A sessão já foi fechada: nenhum pedido pode mais mudar de status",
+        "SESSION_CLOSED"
+      );
     case "invalid-transition":
       return errorResponse(
         409,

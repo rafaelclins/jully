@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { OrderStatus, Prisma } from "@/generated/prisma/client";
+import { OrderStatus, Prisma, SessionStatus } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getOrCreateOpenSessionForTableWithClient } from "@/services/sessions";
 import { getTableByQrToken } from "@/services/tables";
@@ -402,6 +402,7 @@ export async function listOperationalOrdersByRestaurantId(
 export type UpdateOrderStatusResult =
   | { outcome: "updated"; id: string; status: string; updatedAt: string }
   | { outcome: "order-not-found" }
+  | { outcome: "session-closed" }
   | { outcome: "invalid-transition" }
   | { outcome: "status-conflict" };
 
@@ -410,6 +411,14 @@ export type UpdateOrderStatusResult =
 // count 0 e a operacao responde 409 ORDER_STATUS_CONFLICT em vez de sobrescrever.
 // Nunca expoe pedidos de outro tenant: o where sempre filtra restaurantId, e o
 // pedido inexistente/cross-tenant responde "order-not-found" (404).
+//
+// Etapa 14: toda a maquina de estados operacional (PENDING -> PREPARING ->
+// READY) e bloqueada em Orders de Session CLOSED. A protecao e dupla:
+//   - validacao de leitura: se a Session da Order ja esta CLOSED, responde
+//     "session-closed" (409 SESSION_CLOSED) sem checar a transicao;
+//   - condicao atomica no UPDATE: o WHERE exige session.status = OPEN, entao
+//     mesmo que um close concorra entre a leitura e o update, o segundo nunca
+//     grava numa Session CLOSED (cai em 409 STATUS_CONFLICT). Tenant-scoped.
 export async function updateOrderStatus({
   restaurantId,
   orderId,
@@ -421,10 +430,17 @@ export async function updateOrderStatus({
 }): Promise<UpdateOrderStatusResult> {
   const current = await prisma.order.findFirst({
     where: { id: orderId, restaurantId },
-    select: { status: true },
+    select: {
+      status: true,
+      session: { select: { status: true } },
+    },
   });
   if (!current) {
     return { outcome: "order-not-found" };
+  }
+
+  if (current.session.status === SessionStatus.CLOSED) {
+    return { outcome: "session-closed" };
   }
 
   const allowed = ALLOWED_ORDER_TRANSITIONS[current.status];
@@ -433,7 +449,12 @@ export async function updateOrderStatus({
   }
 
   const updated = await prisma.order.updateMany({
-    where: { id: orderId, restaurantId, status: current.status },
+    where: {
+      id: orderId,
+      restaurantId,
+      status: current.status,
+      session: { status: SessionStatus.OPEN },
+    },
     data: { status },
   });
   if (updated.count !== 1) {

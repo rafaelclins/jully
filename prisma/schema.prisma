@@ -111,8 +111,16 @@ model TableSession {
   status       SessionStatus @default(OPEN)
   openedAt     DateTime      @default(now())
   closedAt     DateTime?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  // ---------- Snapshots financeiros do fechamento (Etapa 14) ----------
+  // NULL enquanto OPEN. Todos os quatro sao gravados atomicamente junto com
+  // status=CLOSED + closedAt. Para CLOSED, o resumo financeiro e imutavel:
+  // nunca mais depende da configuracao atual do Restaurant nem de Product.
+  closedSubtotal            Decimal? @db.Decimal(10, 2)
+  serviceFeePercentSnapshot Decimal? @db.Decimal(5, 2)
+  closedServiceFeeAmount    Decimal? @db.Decimal(10, 2)
+  closedTotal               Decimal? @db.Decimal(10, 2)
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   table  Table   @relation(fields: [tableId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
   orders Order[]

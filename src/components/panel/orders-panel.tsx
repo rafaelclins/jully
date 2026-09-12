@@ -47,6 +47,8 @@ function transitionMessage(code?: string): string {
       return "Este pedido foi atualizado por outra tela. A lista foi recarregada.";
     case "INVALID_STATUS_TRANSITION":
       return "Não é possível fazer essa mudança de status.";
+    case "SESSION_CLOSED":
+      return "A mesa já foi fechada. Nenhum pedido pode mais mudar de status.";
     case "ORDER_NOT_FOUND":
       return "Pedido não encontrado.";
     default:

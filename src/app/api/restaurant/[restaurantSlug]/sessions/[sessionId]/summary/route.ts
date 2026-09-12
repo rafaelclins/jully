@@ -20,7 +20,9 @@ const sessionIdSchema = z.string().trim().min(1).max(64).uuid();
 //   - Session de outro tenant OU inexistente -> 404 SESSION_NOT_FOUND
 // Financeiro: subtotal = soma dos OrderItem.subtotal (snapshots historicos)
 // dos pedidos PENDING/PREPARING/READY; CANCELLED fica de fora; taxa de
-// servico = configuracao atual do Restaurant no momento da consulta.
+// servico: em Session OPEN usa a configuracao atual do Restaurant (estimativa
+// provisoria); em Session CLOSED utiliza exclusivamente os snapshots
+// gravados no fechamento (historico imutavel).
 export async function GET(
   _request: Request,
   {
