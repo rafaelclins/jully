@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -11,6 +12,7 @@ type PanelOrder = {
   status: "PENDING" | "PREPARING" | "READY";
   createdAt: string;
   updatedAt: string;
+  sessionId: string;
   tableNumber: number;
   items: {
     id: string;
@@ -305,6 +307,7 @@ const loadOrders = useCallback(async () => {
                       <li key={order.id}>
                         <OrderCard
                           order={order}
+                          restaurantSlug={restaurantSlug}
                           busy={busyOrderIds.has(order.id)}
                           onAdvance={() => void advanceStatus(order)}
                         />
@@ -323,10 +326,12 @@ const loadOrders = useCallback(async () => {
 
 function OrderCard({
   order,
+  restaurantSlug,
   busy,
   onAdvance,
 }: {
   order: PanelOrder;
+  restaurantSlug: string;
   busy: boolean;
   onAdvance: () => void;
 }) {
@@ -391,6 +396,13 @@ function OrderCard({
             {busy ? "Atualizando…" : transition.label}
           </button>
         ) : null}
+
+        <Link
+          href={`/restaurant/${restaurantSlug}/sessions/${order.sessionId}`}
+          className="mt-2 block w-full rounded-full border border-zinc-300 bg-white px-4 py-2 text-center text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900"
+        >
+          Ver conta da mesa
+        </Link>
       </div>
     </article>
   );

@@ -320,6 +320,7 @@ export type OperationalOrderDto = {
   status: string;
   createdAt: string;
   updatedAt: string;
+  sessionId: string;
   tableNumber: number;
   items: {
     id: string;
@@ -345,6 +346,7 @@ function toOperationalOrderDto(
     status: order.status,
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
+    sessionId: order.sessionId,
     tableNumber: order.session.table.number,
     items: order.items.map((item) => ({
       id: item.id,
