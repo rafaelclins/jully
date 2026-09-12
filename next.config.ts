@@ -76,6 +76,9 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   // Remove o header X-Powered-By: Next.js (disclosure de framework).
   poweredByHeader: false,
+  // Dist independente por processo (JULLY_NEXT_DIST) evita colisão entre o
+  // servidor de smoke (etapa 16) e um `next dev`/`next build` em andamento.
+  distDir: process.env.JULLY_NEXT_DIST ?? ".next",
   async headers() {
     return [
       {

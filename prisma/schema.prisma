@@ -239,6 +239,11 @@ model Payment {
   status            PaymentStatus @default(PENDING)
   method            PaymentMethod?
   provider          String?
+  // Identificador seguro junto ao provedor (Etapa 16). Unico em conjunto com
+  // (provider, providerPaymentId): provedores diferentes podem gerar o mesmo
+  // id textual, entao a unicidade global nao vale; apenas dentro do mesmo
+  // provider. NULL e tolerado multiplas vezes pelo Postgres (linhas ainda nao
+  // integradas/ambíguas nao colidem).
   providerPaymentId String?
   // Chave de idempotência UUID fornecida pelo cliente/fluxo de integração.
   idempotencyKey    String        @db.Uuid
@@ -252,10 +257,45 @@ model Payment {
   @@unique([id, restaurantId])
   // Idempotência tenant-safe: a Session já é tenant-scoped pela FK composta.
   @@unique([sessionId, idempotencyKey])
+  // Etapa 16: provêders podem gerar o mesmo id textual -> unicidade por provider.
+  @@unique([provider, providerPaymentId])
   @@index([sessionId])
   @@index([restaurantId])
   @@index([status])
   @@map("payments")
+}
+
+// ---------- Eventos de webhook de pagamento (Etapa 16) ----------
+// Log de eventos recebidos de provedores. Alem de auditoria, e a base do
+// replay protection: exclusive (provider, providerEventId) garante que um
+// mesmo evento e processado no maximo uma vez (idempotencia do webhook).
+//
+// Nenhum payload bruto sensivel e armazenado: apenas referencias seguras
+// (providerEventId, providerPaymentId, eventType) + carimbos. A aplicacao da
+// transicao e separada (marcacao de Payment e atomica + validada pela state
+// machine), portanto um evento tardio nunca regride um estado terminal.
+//
+// Cross-tenant: impossivel por construcao — o evento nao carrega tenant; o
+// Payment e resolvido por (provider, providerPaymentId), ambos seguros do
+// provedor, nunca por valores do browser.
+model PaymentWebhookEvent {
+  id                String    @id @default(uuid()) @db.Uuid
+  provider          String
+  // Identificador deduplicavel do provedor (ex.: charge.updated event id).
+  providerEventId   String
+  // Referencia da cobrança no provedor, resolvida em payments(provider, id).
+  providerPaymentId String
+  // Tipo de evento bruto do provedor (traduzido pelo adapter do provider).
+  eventType         String
+  occurredAt        DateTime?
+  receivedAt        DateTime  @default(now())
+  processedAt       DateTime?
+  // Resultado do processamento ("applied" | "ignored" | "no-regress" ...).
+  outcome           String?
+
+  @@unique([provider, providerEventId])
+  @@index([provider, providerPaymentId])
+  @@map("payment_webhook_events")
 }
 
 // ---------- Better Auth (Etapa 11) ----------

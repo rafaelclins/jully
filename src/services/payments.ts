@@ -6,7 +6,16 @@ import {
 } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { assertSupportedCurrency } from "@/lib/money/currency";
-import { SessionSummaryIntegrityError } from "@/services/sessions";
+import { logProviderOperation } from "@/payment-provider/logging";
+import {
+  ProviderDefinitiveError,
+  type CreateProviderPaymentResult,
+  type PaymentProvider,
+} from "@/payment-provider/types";
+import {
+  SERVICE_FEE_ROUNDING,
+  SessionSummaryIntegrityError,
+} from "@/services/sessions";
 
 // ---------- Etapa 15: domínio de pagamento (fronteira, NÃO exposta via HTTP) ----------
 //
@@ -65,7 +74,56 @@ export type PaymentDto = {
 
 type PaymentRow = Prisma.PaymentGetPayload<{ select: typeof paymentSelect }>;
 
-function toDto(payment: PaymentRow): PaymentDto {
+const paymentSessionSelect = {
+  status: true,
+  closedSubtotal: true,
+  serviceFeePercentSnapshot: true,
+  closedServiceFeeAmount: true,
+  closedTotal: true,
+  currencySnapshot: true,
+} satisfies Prisma.TableSessionSelect;
+
+type PaymentSessionSnapshot = Prisma.TableSessionGetPayload<{
+  select: typeof paymentSessionSelect;
+}>;
+
+function assertValidClosedSnapshot(
+  sessionId: string,
+  session: PaymentSessionSnapshot
+): asserts session is PaymentSessionSnapshot & {
+  closedSubtotal: Prisma.Decimal;
+  serviceFeePercentSnapshot: Prisma.Decimal;
+  closedServiceFeeAmount: Prisma.Decimal;
+  closedTotal: Prisma.Decimal;
+  currencySnapshot: string;
+} {
+  if (
+    session.closedSubtotal === null ||
+    session.serviceFeePercentSnapshot === null ||
+    session.closedServiceFeeAmount === null ||
+    session.closedTotal === null ||
+    session.currencySnapshot === null
+  ) {
+    throw new SessionSummaryIntegrityError(
+      `session ${sessionId} is CLOSED but financial snapshot is incomplete; payment refused`
+    );
+  }
+  const expectedFee = session.closedSubtotal
+    .mul(session.serviceFeePercentSnapshot)
+    .div(100)
+    .toDecimalPlaces(2, SERVICE_FEE_ROUNDING);
+  const expectedTotal = session.closedSubtotal.add(expectedFee);
+  if (
+    !session.closedServiceFeeAmount.equals(expectedFee) ||
+    !session.closedTotal.equals(expectedTotal)
+  ) {
+    throw new SessionSummaryIntegrityError(
+      `session ${sessionId} is CLOSED but financial snapshot is inconsistent; payment refused`
+    );
+  }
+}
+
+export function toPaymentDto(payment: PaymentRow): PaymentDto {
   return {
     id: payment.id,
     restaurantId: payment.restaurantId,
@@ -119,7 +177,7 @@ export async function createPayment({
 }: CreatePaymentInput): Promise<CreatePaymentResult> {
   const session = await prisma.tableSession.findFirst({
     where: { id: sessionId, restaurantId },
-    select: { status: true, closedTotal: true, currencySnapshot: true },
+    select: paymentSessionSelect,
   });
   if (!session) {
     return { outcome: "session-not-found" };
@@ -127,11 +185,7 @@ export async function createPayment({
   if (session.status !== SessionStatus.CLOSED) {
     return { outcome: "session-not-closed" };
   }
-  if (session.closedTotal === null || session.currencySnapshot === null) {
-    throw new SessionSummaryIntegrityError(
-      `session ${sessionId} is CLOSED but financial snapshot is incomplete; payment refused`
-    );
-  }
+  assertValidClosedSnapshot(sessionId, session);
   const currency = assertSupportedCurrency(session.currencySnapshot);
 
   try {
@@ -148,7 +202,7 @@ export async function createPayment({
       },
       select: paymentSelect,
     });
-    return { outcome: "created", payment: toDto(payment) };
+    return { outcome: "created", payment: toPaymentDto(payment) };
   } catch (error) {
     if (isUniqueViolation(error)) {
       const existing = await prisma.payment.findFirst({
@@ -158,9 +212,243 @@ export async function createPayment({
       if (!existing) {
         throw error;
       }
-      return { outcome: "replayed", payment: toDto(existing) };
+      return { outcome: "replayed", payment: toPaymentDto(existing) };
     }
     throw error;
+  }
+}
+
+// ---------- Etapa 16: Payment Application Service (início de tentativa) ----------
+//
+// Fluxo:
+//   Session CLOSED (nunca OPEN — sem disparar webhook/checkout em mesa aberta)
+//   -> Payment ainda não PAID
+//   -> criar/reusar tentativa idempotente (unique(sessionId, idempotencyKey))
+//   -> chamar PaymentProvider (adapter, interface abstrata)
+//   -> persistir providerPaymentId + estado coerente
+//
+// amount/currency são DERIVADOS da Session fechada (closedTotal +
+// currencySnapshot) — o browser nunca informa valores. Tenância sempre
+// server-side (restaurantId vem da autorização). Nenhum dado sensível de
+// pagamento trafega aqui.
+//
+// Timeout/ambiguidade (seção 17): se o provider não confirma o resultado,
+// o Payment PERMANECE PENDING — NUNCA FAILED automaticamente (a resposta pode
+// ter se perdido após o provider ter cobrado). Fica para reconciliação.
+
+export type InitiatePaymentInput = {
+  restaurantId: string;
+  sessionId: string;
+  idempotencyKey: string;
+  method: PaymentMethod;
+  provider: PaymentProvider;
+};
+
+export type InitiatePaymentResult =
+  | { outcome: "created"; payment: PaymentDto }
+  | { outcome: "replayed"; payment: PaymentDto }
+  | { outcome: "paid"; payment: PaymentDto }
+  | { outcome: "failed"; payment: PaymentDto }
+  | { outcome: "payment-already-pending"; payment: PaymentDto }
+  | { outcome: "payment-already-paid"; payment: PaymentDto }
+  | { outcome: "one-paid-per-session"; payment: PaymentDto }
+  | { outcome: "session-not-found" }
+  | { outcome: "session-not-closed" };
+
+async function persistProviderPaymentId(
+  restaurantId: string,
+  paymentId: string,
+  providerPaymentId: string
+): Promise<void> {
+  await prisma.payment.updateMany({
+    where: { id: paymentId, restaurantId },
+    data: { providerPaymentId },
+  });
+}
+
+// Regras conservadoras da primeira versão (seção 19):
+//   - mesma idempotencyKey -> MESMA tentativa (replay), sem nova chamada ao
+//     provider — o engajamento é exclusivo do criador da tentativa;
+//   - FAILED/CANCELLED -> nova idempotencyKey pode criar nova tentativa;
+//   - PENDING já engajado no provider (providerPaymentId presente) -> NÃO criar
+//     tentativa equivalente (evita cobrança dupla); a reconciliação resolve;
+//   - Session já PAID -> nova tentativa bloqueada.
+export async function initiatePayment({
+  restaurantId,
+  sessionId,
+  idempotencyKey,
+  method,
+  provider,
+}: InitiatePaymentInput): Promise<InitiatePaymentResult> {
+  const session = await prisma.tableSession.findFirst({
+    where: { id: sessionId, restaurantId },
+    select: paymentSessionSelect,
+  });
+  if (!session) {
+    return { outcome: "session-not-found" };
+  }
+  if (session.status !== SessionStatus.CLOSED) {
+    return { outcome: "session-not-closed" };
+  }
+  assertValidClosedSnapshot(sessionId, session);
+  const currency = assertSupportedCurrency(session.currencySnapshot);
+
+  // Replay idempotente: mesma chave -> mesma tentativa (qualquer status).
+  const replayed = await prisma.payment.findFirst({
+    where: { sessionId, idempotencyKey, restaurantId },
+    select: paymentSelect,
+  });
+  if (replayed) {
+    return { outcome: "replayed", payment: toPaymentDto(replayed) };
+  }
+
+  // Bloqueios conservadores (não atômicos; a última barreira é o índice único
+  // payments_one_paid_per_session no banco).
+  const alreadyPaid = await prisma.payment.findFirst({
+    where: {
+      sessionId,
+      restaurantId,
+      status: PaymentStatus.PAID,
+    },
+    select: paymentSelect,
+  });
+  if (alreadyPaid) {
+    return { outcome: "payment-already-paid", payment: toPaymentDto(alreadyPaid) };
+  }
+  const engagedPending = await prisma.payment.findFirst({
+    where: {
+      sessionId,
+      restaurantId,
+      status: PaymentStatus.PENDING,
+      providerPaymentId: { not: null },
+    },
+    select: paymentSelect,
+  });
+  if (engagedPending) {
+    return {
+      outcome: "payment-already-pending",
+      payment: toPaymentDto(engagedPending),
+    };
+  }
+
+  // Criação da tentativa PENDING. unique(sessionId, idempotencyKey) resolve a
+  // corrida entre requests concorrentes com a mesma chave: 1 criador, N replays.
+  let attempt: PaymentDto;
+  try {
+    const created = await prisma.payment.create({
+      data: {
+        restaurantId,
+        sessionId,
+        amount: session.closedTotal,
+        currency,
+        idempotencyKey,
+        method,
+        provider: provider.name,
+        status: PaymentStatus.PENDING,
+      },
+      select: paymentSelect,
+    });
+    attempt = toPaymentDto(created);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const winning = await prisma.payment.findFirst({
+        where: { sessionId, idempotencyKey, restaurantId },
+        select: paymentSelect,
+      });
+      if (winning) {
+        return { outcome: "replayed", payment: toPaymentDto(winning) };
+      }
+    }
+    throw error;
+  }
+
+  const started = Date.now();
+  let providerResult: CreateProviderPaymentResult;
+  try {
+    providerResult = await provider.createPayment({
+      internalPaymentId: attempt.id,
+      idempotencyKey,
+      amount: attempt.amount,
+      currency: attempt.currency,
+      method,
+    });
+    logProviderOperation({
+      kind: "create",
+      provider: provider.name,
+      operation: "createPayment",
+      result: providerResult.status,
+      durationMs: Date.now() - started,
+      internalPaymentId: attempt.id,
+    });
+  } catch (error) {
+    const durationMs = Date.now() - started;
+    if (error instanceof ProviderDefinitiveError) {
+      // Rejeição definitiva (cartão recusado, método inválido) -> FAILED.
+      logProviderOperation({
+        kind: "create",
+        provider: provider.name,
+        operation: "createPayment",
+        result: "failed",
+        durationMs,
+        internalPaymentId: attempt.id,
+        failureCode: error.failureCode,
+      });
+      await markPaymentFailed({ restaurantId, paymentId: attempt.id });
+      const current = await fetchCurrentPayment(attempt.id, restaurantId);
+      return { outcome: "failed", payment: current ?? attempt };
+    }
+    // Ambíguo (timeout/reset/5xx) ou exceção inesperada: permanece PENDING.
+    // Nunca FAILED — a resposta pode ter se perdido após cobrança no provider.
+    logProviderOperation({
+      kind: "create",
+      provider: provider.name,
+      operation: "createPayment",
+      result: "ambiguous",
+      durationMs,
+      internalPaymentId: attempt.id,
+      failureCode: error instanceof Error ? error.name : undefined,
+    });
+    return { outcome: "created", payment: attempt };
+  }
+
+  switch (providerResult.status) {
+    case "paid": {
+      await persistProviderPaymentId(
+        restaurantId,
+        attempt.id,
+        providerResult.providerPaymentId
+      );
+      const transition = await markPaymentPaid({
+        restaurantId,
+        paymentId: attempt.id,
+      });
+      const current = await fetchCurrentPayment(attempt.id, restaurantId);
+      if (transition.outcome === "one-paid-per-session") {
+        return { outcome: "one-paid-per-session", payment: current ?? attempt };
+      }
+      return { outcome: "paid", payment: current ?? attempt };
+    }
+    case "pending": {
+      await persistProviderPaymentId(
+        restaurantId,
+        attempt.id,
+        providerResult.providerPaymentId
+      );
+      const current = await fetchCurrentPayment(attempt.id, restaurantId);
+      return { outcome: "created", payment: current ?? attempt };
+    }
+    case "failed": {
+      if (providerResult.providerPaymentId) {
+        await persistProviderPaymentId(
+          restaurantId,
+          attempt.id,
+          providerResult.providerPaymentId
+        );
+      }
+      await markPaymentFailed({ restaurantId, paymentId: attempt.id });
+      const current = await fetchCurrentPayment(attempt.id, restaurantId);
+      return { outcome: "failed", payment: current ?? attempt };
+    }
   }
 }
 
@@ -169,7 +457,7 @@ export type PaymentTransitionResult =
   | { outcome: "already"; payment: PaymentDto }
   | { outcome: "payment-not-found" }
   | { outcome: "invalid-state" }
-  | { outcome: "one-paid-per-session" };
+  | { outcome: "one-paid-per-session"; payment: PaymentDto };
 
 const PENDING = PaymentStatus.PENDING;
 
@@ -181,7 +469,7 @@ async function fetchCurrentPayment(
     where: { id: paymentId, restaurantId },
     select: paymentSelect,
   });
-  return payment ? toDto(payment) : null;
+  return payment ? toPaymentDto(payment) : null;
 }
 
 // Transição PENDING -> PAID (atômica: WHERE status=PENDING). Casos:
@@ -214,7 +502,11 @@ export async function markPaymentPaid({
     });
 
   if ("conflict" in updated) {
-    return { outcome: "one-paid-per-session" };
+    const current = await fetchCurrentPayment(paymentId, restaurantId);
+    if (!current) {
+      return { outcome: "payment-not-found" };
+    }
+    return { outcome: "one-paid-per-session", payment: current };
   }
 
   if (updated.count === 1) {
