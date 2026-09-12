@@ -182,15 +182,28 @@ export type CloseSessionResult =
 
 // Fechamento idempotente e concorrente-seguro.
 //
-// Serializacao: em transacao, a linha da Session e travada com SELECT ...
-// FOR UPDATE. Dois operadores fechando a mesma mesa no mesmo instante:
-//   - o primeiro trava, valida bloqueios, marca CLOSED e faz commit;
-//   - o segundo (que estava bloqueado no FOR UPDATE) le a Session ja CLOSED
-//     e responde "already-closed" com o MESMO resumo/closedAt.
-// Regra de fechamento: so fecha com status OPEN e sem Order PENDING/PREPARING
-// (READY/CANCELLED nao bloqueiam). A rejecao e atomica com a mudanca de
-// estado (mesma transacao), entao um close bem-sucedido nunca convive com
-// pedido em andamento.
+// Serializacao: criacao de pedido e fechamento de mesa participam do MESMO
+// protocolo de lock por mesa. Antes da Etapa 13, cada fluxo usava um lock
+// proprio (o create nao travava nada; o close travava so a linha da Session),
+// permitindo a corrida: create lia a Session OPEN, close fechava a mesa, e o
+// create commitava um Order PENDING numa Session ja CLOSED.
+//
+// Protocolo atual: dentro da transacao, a linha da Tabela da Session e travada
+// com SELECT ... FOR UPDATE (mesma regiao que a criacao de pedido). Depois de
+// travar a tabela, o estado da Session e relido (nao mais reutiliza estado
+// lido fora do lock). Com isso:
+//   - close vence: Session vira CLOSED e o create que estava serializado apos
+//     encontra apenas OPEN resolver/criar uma NOVA Session;
+//   - pedido vence: o close relido apos o lock ve a Order PENDING/PREPARING e
+//     responde 409 (has-orders-in-progress).
+// Invariante garantida: nenhuma Session CLOSED possui Order PENDING/PREPARING
+// criada depois do seu fechamento.
+//
+// Idempotencia do close: dois operadores fechando a mesma mesa: o primeiro
+// marca CLOSED e faz commit; o segundo (serializado no lock da tabela) reler a
+// Session ja CLOSED e responde "already-closed" com o MESMO resumo/closedAt.
+// So fecha com status OPEN e sem Order PENDING/PREPARING (READY/CANCELLED nao
+// bloqueiam). A rejeicao e atomica com a mudanca de estado (mesma transacao).
 export async function closeSession({
   restaurantId,
   sessionId,
@@ -199,19 +212,42 @@ export async function closeSession({
   sessionId: string;
 }): Promise<CloseSessionResult> {
   const outcome = await prisma.$transaction(async (tx) => {
+    const resolved = await tx.$queryRaw<{ tableId: string }[]>(
+      Prisma.sql`
+        SELECT "tableId" FROM "sessions"
+        WHERE "id" = ${sessionId}::uuid
+          AND "restaurantId" = ${restaurantId}::uuid
+      `
+    );
+    if (resolved.length === 0) {
+      return { outcome: "not-found" } as const;
+    }
+
+    // Regiao de serializacao compartilhada com a criacao de pedido: lock na
+    // linha da Tabela (um so fluxo de escrita por mesa por vez).
+    await tx.$queryRaw(
+      Prisma.sql`
+        SELECT "id" FROM "tables"
+        WHERE "id" = ${resolved[0].tableId}::uuid
+          AND "restaurantId" = ${restaurantId}::uuid
+        FOR UPDATE
+      `
+    );
+
+    // Estado relido dentro da regiao serializada: nao reutilizar a leitura
+    // feita antes do lock.
     const rows = await tx.$queryRaw<{ status: string }[]>(
       Prisma.sql`
         SELECT "status" FROM "sessions"
         WHERE "id" = ${sessionId}::uuid
           AND "restaurantId" = ${restaurantId}::uuid
-        FOR UPDATE
       `
     );
     if (rows.length === 0) {
       return { outcome: "not-found" } as const;
     }
     if (rows[0].status === SessionStatus.CLOSED) {
-      return { outcome: "already-closed" as const };
+      return { outcome: "already-closed" } as const;
     }
 
     const blockers = await tx.$queryRaw<{ id: string }[]>(
@@ -297,20 +333,29 @@ export type OpenSessionResult =
   | { outcome: "table-not-found" }
   | { outcome: "table-inactive" };
 
-export async function getOrCreateOpenSessionForTable({
-  restaurantId,
-  tableId,
-}: {
-  restaurantId: string;
-  tableId: string;
-}): Promise<{ session: SessionPublic; created: boolean }> {
-  const existing = await getOpenSessionByTable({ restaurantId, tableId });
+type TableSessionClient = Prisma.TransactionClient | typeof prisma;
+
+// Resolver/criar a Session OPEN de uma mesa, operando sobre um client
+// arbitrario (o prisma global ou uma transacao). A criacao de pedido usa a
+// variante de transacao: resolve a Session DENTRO da regiao serializada pelo
+// lock da Tabela, garantindo que nunca reutiliza uma Session ja fechada.
+// A variante global mantem o P2002 da indice unico parcial
+// (sessions_one_open_per_table) como rede de seguranca para produtores que
+// nao participam do lock (ex.: endpoint publico de abertura de sessao).
+export async function getOrCreateOpenSessionForTableWithClient(
+  db: TableSessionClient,
+  { restaurantId, tableId }: { restaurantId: string; tableId: string }
+): Promise<{ session: SessionPublic; created: boolean }> {
+  const existing = await db.tableSession.findFirst({
+    where: { restaurantId, tableId, status: SessionStatus.OPEN },
+    select: sessionPublicSelect,
+  });
   if (existing) {
     return { session: existing, created: false };
   }
 
   try {
-    const session = await prisma.tableSession.create({
+    const session = await db.tableSession.create({
       data: {
         restaurantId,
         tableId,
@@ -324,13 +369,29 @@ export async function getOrCreateOpenSessionForTable({
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
     ) {
-      const conflicting = await getOpenSessionByTable({ restaurantId, tableId });
+      const conflicting = await db.tableSession.findFirst({
+        where: { restaurantId, tableId, status: SessionStatus.OPEN },
+        select: sessionPublicSelect,
+      });
       if (conflicting) {
         return { session: conflicting, created: false };
       }
     }
     throw error;
   }
+}
+
+export async function getOrCreateOpenSessionForTable({
+  restaurantId,
+  tableId,
+}: {
+  restaurantId: string;
+  tableId: string;
+}): Promise<{ session: SessionPublic; created: boolean }> {
+  return getOrCreateOpenSessionForTableWithClient(prisma, {
+    restaurantId,
+    tableId,
+  });
 }
 
 export async function getOrCreateOpenSessionByQrToken(

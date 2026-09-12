@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { OrderStatus, Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getOrCreateOpenSessionForTable } from "@/services/sessions";
+import { getOrCreateOpenSessionForTableWithClient } from "@/services/sessions";
 import { getTableByQrToken } from "@/services/tables";
 
 export const MAX_ORDER_ITEM_QUANTITY = 99;
@@ -172,6 +172,20 @@ function toCreatedOrderDto(order: OrderWithItems): CreatedOrderDto {
   };
 }
 
+// Criacao de pedido e fechamento de mesa compartilham o MESMO protocolo de
+// serializacao por mesa: lock na linha da Tabela (SELECT ... FOR UPDATE)
+// dentro da transacao. Toda a resolucao/criacao de Session e de Order acontece
+// DENTRO dessa regiao, e o estado da Session e relido depois do lock.
+//
+// Assim, se o fechamento venceu (Session ja CLOSED), a criacao serializada a
+// pos encontra apenas Sessions OPEN -> resolve/cria uma NOVA Session, e o
+// Order nunca pertence a Session CLOSED. Se a criacao vence, o close relido
+// apos o lock ve o PENDING/PREPARING e responde 409 (invariante preservada).
+//
+// Idempotencia: a checagem de replay fica na mesma regiao serializada, entao
+// dois envios com a mesma Idempotency-Key na mesma mesa serializam e o segundo
+// relê o Order commitado (sem P2002 na borda). A chave continua escopada por
+// TableSession: um retry apos fechamento cai numa Session nova.
 export async function createOrderForTableQrToken(
   qrToken: string,
   idempotencyKey: string,
@@ -193,97 +207,104 @@ export async function createOrderForTableQrToken(
   }
 
   const fingerprint = computeRequestFingerprint(normalized.entries);
+  const productIds = normalized.entries.map((entry) => entry.productId);
 
-  const { session } = await getOrCreateOpenSessionForTable({
-    restaurantId,
-    tableId: table.id,
-  });
+  const result = await prisma.$transaction(async (tx) => {
+    // Regiao de serializacao compartilhada com o fechamento de mesa.
+    const locked = await tx.$queryRaw<{ id: string }[]>(
+      Prisma.sql`
+        SELECT "id" FROM "tables"
+        WHERE "id" = ${table.id}::uuid
+          AND "restaurantId" = ${restaurantId}::uuid
+        FOR UPDATE
+      `
+    );
+    if (locked.length === 0) {
+      return { outcome: "table-not-found" } as const;
+    }
 
-  const replayExisting = async (): Promise<
-    CreateOrderResult | "missing"
-  > => {
-    const existing = await prisma.order.findFirst({
+    // Resolucao da Session dentro da regiao serializada: revalida se ainda
+    // existe Session OPEN (nunca reutiliza sessionId lido antes do lock).
+    const { session } = await getOrCreateOpenSessionForTableWithClient(tx, {
+      restaurantId,
+      tableId: table.id,
+    });
+
+    const existing = await tx.order.findFirst({
       where: { sessionId: session.id, idempotencyKey, restaurantId },
       select: orderForReplaySelect,
     });
-    if (!existing) {
-      return "missing";
+    if (existing) {
+      if (existing.requestFingerprint !== fingerprint) {
+        return { outcome: "idempotency-conflict" } as const;
+      }
+      return { outcome: "replayed", order: existing } as const;
     }
-    if (existing.requestFingerprint !== fingerprint) {
-      return { outcome: "idempotency-conflict" };
+
+    const products = await tx.product.findMany({
+      where: { id: { in: productIds }, restaurantId, active: true },
+    });
+    if (products.length !== productIds.length) {
+      return { outcome: "menu-changed" } as const;
     }
-    return { outcome: "replayed", order: toCreatedOrderDto(existing) };
-  };
+    const productsById = new Map(
+      products.map((product) => [product.id, product])
+    );
 
-  const fastPath = await replayExisting();
-  if (fastPath !== "missing") {
-    return fastPath;
-  }
+    const order = await tx.order.create({
+      data: {
+        sessionId: session.id,
+        restaurantId,
+        idempotencyKey,
+        requestFingerprint: fingerprint,
+      },
+      select: { id: true },
+    });
 
-  const productIds = normalized.entries.map((entry) => entry.productId);
-  const products = await prisma.product.findMany({
-    where: { id: { in: productIds }, restaurantId, active: true },
+    await tx.orderItem.createMany({
+      data: normalized.entries.map((entry) => {
+        const product = productsById.get(entry.productId);
+        if (!product) {
+          throw new Error(
+            `Product ${entry.productId} resolved but missing after lookup`
+          );
+        }
+        return {
+          orderId: order.id,
+          productId: product.id,
+          restaurantId,
+          productName: product.name,
+          unitPrice: product.price,
+          quantity: entry.quantity,
+          subtotal: product.price.mul(entry.quantity),
+        };
+      }),
+    });
+
+    return { outcome: "created", orderId: order.id } as const;
   });
-  if (products.length !== productIds.length) {
+
+  if (result.outcome === "table-not-found") {
+    return { outcome: "table-not-found" };
+  }
+  if (result.outcome === "menu-changed") {
     return { outcome: "menu-changed" };
   }
-  const productsById = new Map(products.map((product) => [product.id, product]));
-
-  try {
-    const createdId = await prisma.$transaction(async (tx) => {
-      const order = await tx.order.create({
-        data: {
-          sessionId: session.id,
-          restaurantId,
-          idempotencyKey,
-          requestFingerprint: fingerprint,
-        },
-        select: { id: true },
-      });
-
-      await tx.orderItem.createMany({
-        data: normalized.entries.map((entry) => {
-          const product = productsById.get(entry.productId);
-          if (!product) {
-            throw new Error(
-              `Product ${entry.productId} resolved but missing after lookup`
-            );
-          }
-          return {
-            orderId: order.id,
-            productId: product.id,
-            restaurantId,
-            productName: product.name,
-            unitPrice: product.price,
-            quantity: entry.quantity,
-            subtotal: product.price.mul(entry.quantity),
-          };
-        }),
-      });
-
-      return order.id;
-    });
-
-    const full = await prisma.order.findFirst({
-      where: { id: createdId, restaurantId },
-      select: orderWithItemsSelect,
-    });
-    if (!full) {
-      throw new Error("Created order not found for DTO");
-    }
-    return { outcome: "created", order: toCreatedOrderDto(full) };
-  } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === "P2002"
-    ) {
-      const raced = await replayExisting();
-      if (raced !== "missing") {
-        return raced;
-      }
-    }
-    throw error;
+  if (result.outcome === "idempotency-conflict") {
+    return { outcome: "idempotency-conflict" };
   }
+  if (result.outcome === "replayed") {
+    return { outcome: "replayed", order: toCreatedOrderDto(result.order) };
+  }
+
+  const full = await prisma.order.findFirst({
+    where: { id: result.orderId, restaurantId },
+    select: orderWithItemsSelect,
+  });
+  if (!full) {
+    throw new Error("Created order not found for DTO");
+  }
+  return { outcome: "created", order: toCreatedOrderDto(full) };
 }
 
 const operationalOrderListSelect = {
