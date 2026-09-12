@@ -2,7 +2,10 @@ import { z } from "zod";
 
 import { errorResponse } from "@/lib/public-api";
 import { requireRestaurantAccess } from "@/lib/require-restaurant-access";
-import { getSessionSummary } from "@/services/sessions";
+import {
+  getSessionSummary,
+  SessionSummaryIntegrityError,
+} from "@/services/sessions";
 
 const slugSchema = z
   .string()
@@ -56,7 +59,14 @@ export async function GET(
       sessionId: parsedSessionId.data,
     });
   } catch (error) {
-    console.error("[panel] failed to get session summary:", error);
+    if (error instanceof SessionSummaryIntegrityError) {
+      console.error(
+        "[panel] session-summary integrity violation: CLOSED session with incomplete financial snapshot",
+        error
+      );
+    } else {
+      console.error("[panel] failed to get session summary:", error);
+    }
     return errorResponse(500, "Internal server error");
   }
 

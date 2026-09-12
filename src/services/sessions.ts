@@ -28,6 +28,17 @@ export const FINANCIAL_ORDER_STATUS_LIST: OrderStatus[] = [
 // Nunca Float: todo calculo usa Prisma.Decimal.
 export const SERVICE_FEE_ROUNDING = Prisma.Decimal.ROUND_HALF_UP;
 
+// Erro de dominio: Session CLOSED sem snapshots financeiros completos.
+// Indica corrupcao/legado; a aplicacao NAO pode fabricar um historico
+// financeiro a partir de dados vivos. As rotas convertem em erro interno
+// generico (500), sem expor constraint/SQL/stack trace ao cliente.
+export class SessionSummaryIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionSummaryIntegrityError";
+  }
+}
+
 const summarySessionSelect = {
   id: true,
   status: true,
@@ -128,31 +139,43 @@ function buildSummaryDto(
     };
   });
 
-  // Etapa 14: Session CLOSED nunca mais depende da configuracao atual do
-  // Restaurant nem de Product: os quatro valores financeiros vem
-  // exclusivamente dos snapshots persistidos no fechamento. O CHECK
-  // sessions_financial_snapshot_consistency garante que em CLOSED todos os
-  // quatro snapshots existem (defensivamente, se algum estiver NULL em base
-  // legada pre-Check, o calculo cai para o comportamento OPEN/estimativa).
-  let subtotal = sumOrderItemsSubtotal(orders);
-  let serviceFeePercent: Prisma.Decimal = restaurant.serviceFeePercent;
-  let serviceFeeAmount = subtotal
-    .mul(serviceFeePercent)
-    .div(100)
-    .toDecimalPlaces(2, SERVICE_FEE_ROUNDING);
-  let total = subtotal.add(serviceFeeAmount);
+  // Financeiro:
+  //   - Session OPEN: estimativa viva (subtotal dos OrderItem historicos +
+  //     taxa atual do Restaurant). Snapshots sao NULL.
+  //   - Session CLOSED: exclusivamente os snapshots gravados no fechamento.
+  //     NUNCA recalcula com configuracao/dados atuais. Se algum snapshot
+  //     estiver NULL (base legada pre-CHECK, restauracao corrompida, SQL
+  //     manual), e violacao de integridade: lanca SessionSummaryIntegrityError
+  //     em vez de transformar dado corrompido em valor financeiro aparentemente
+  //     valido (nunca responde 200 com valores estimados).
+  let subtotal: Prisma.Decimal;
+  let serviceFeePercent: Prisma.Decimal;
+  let serviceFeeAmount: Prisma.Decimal;
+  let total: Prisma.Decimal;
 
-  if (
-    session.status === SessionStatus.CLOSED &&
-    session.closedSubtotal !== null &&
-    session.serviceFeePercentSnapshot !== null &&
-    session.closedServiceFeeAmount !== null &&
-    session.closedTotal !== null
-  ) {
+  if (session.status === SessionStatus.CLOSED) {
+    if (
+      session.closedSubtotal === null ||
+      session.serviceFeePercentSnapshot === null ||
+      session.closedServiceFeeAmount === null ||
+      session.closedTotal === null
+    ) {
+      throw new SessionSummaryIntegrityError(
+        `session ${session.id} is CLOSED but financial snapshot is incomplete`
+      );
+    }
     subtotal = session.closedSubtotal;
     serviceFeePercent = session.serviceFeePercentSnapshot;
     serviceFeeAmount = session.closedServiceFeeAmount;
     total = session.closedTotal;
+  } else {
+    subtotal = sumOrderItemsSubtotal(orders);
+    serviceFeePercent = restaurant.serviceFeePercent;
+    serviceFeeAmount = subtotal
+      .mul(serviceFeePercent)
+      .div(100)
+      .toDecimalPlaces(2, SERVICE_FEE_ROUNDING);
+    total = subtotal.add(serviceFeeAmount);
   }
 
   return {

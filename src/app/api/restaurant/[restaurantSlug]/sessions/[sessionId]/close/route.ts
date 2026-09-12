@@ -2,7 +2,10 @@ import { z } from "zod";
 
 import { errorResponse } from "@/lib/public-api";
 import { requireRestaurantAccess } from "@/lib/require-restaurant-access";
-import { closeSession } from "@/services/sessions";
+import {
+  closeSession,
+  SessionSummaryIntegrityError,
+} from "@/services/sessions";
 
 const slugSchema = z
   .string()
@@ -70,7 +73,14 @@ export async function POST(
       sessionId: parsedSessionId.data,
     });
   } catch (error) {
-    console.error("[panel] failed to close session:", error);
+    if (error instanceof SessionSummaryIntegrityError) {
+      console.error(
+        "[panel] close-session integrity violation: CLOSED session with incomplete financial snapshot",
+        error
+      );
+    } else {
+      console.error("[panel] failed to close session:", error);
+    }
     return errorResponse(500, "Internal server error");
   }
 
