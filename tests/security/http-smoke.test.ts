@@ -2,6 +2,7 @@ import { test, before } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { prisma } from "@/lib/prisma";
+import { createOrderForTableQrToken } from "@/services/orders";
 import {
   randomUuid,
   resetDatabase,
@@ -29,6 +30,84 @@ async function postPayment(
     },
     body: JSON.stringify(body),
   });
+}
+
+async function patchOrderStatus(
+  slug: string,
+  orderId: string,
+  status: "PREPARING" | "READY",
+  cookies: string[]
+): Promise<Response> {
+  return fetch(`${BASE}/api/restaurant/${slug}/orders/${orderId}/status`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+      cookie: cookies.join("; "),
+    },
+    body: JSON.stringify({ status }),
+  });
+}
+
+async function closeSessionByHttp(
+  slug: string,
+  sessionId: string,
+  cookies: string[]
+): Promise<Response> {
+  return fetch(`${BASE}/api/restaurant/${slug}/sessions/${sessionId}/close`, {
+    method: "POST",
+    headers: { cookie: cookies.join("; ") },
+  });
+}
+
+async function seedOperationalOrder(): Promise<{
+  slug: string;
+  sessionId: string;
+  orderId: string;
+  cookies: string[];
+}> {
+  const slug = `r-${randomUuid().replace(/-/g, "")}`;
+  const restaurant = await prisma.restaurant.create({
+    data: {
+      name: slug,
+      slug,
+      currency: "BRL",
+      serviceFeePercent: 10,
+    },
+  });
+  const qrToken = `t${randomUuid()}`;
+  await prisma.table.create({
+    data: {
+      restaurantId: restaurant.id,
+      number: 7,
+      qrToken,
+    },
+  });
+  const category = await prisma.category.create({
+    data: { restaurantId: restaurant.id, name: "Smoke" },
+  });
+  const product = await prisma.product.create({
+    data: {
+      restaurantId: restaurant.id,
+      categoryId: category.id,
+      name: "Item smoke",
+      price: "10.00",
+    },
+  });
+  const created = await createOrderForTableQrToken(qrToken, randomUuid(), [
+    { productId: product.id, quantity: 2 },
+  ]);
+  assert.equal(created.outcome, "created");
+  const session = await prisma.tableSession.findFirstOrThrow({
+    where: { restaurantId: restaurant.id, status: "OPEN" },
+    select: { id: true },
+  });
+  const cookies = await bootstrapOperatorFor(slug, `smoke-op-${randomUuid()}@example.com`);
+  return {
+    slug,
+    sessionId: session.id,
+    orderId: created.order.id,
+    cookies,
+  };
 }
 
 async function bootstrapOperatorFor(slug: string, email: string): Promise<string[]> {
@@ -92,6 +171,71 @@ test("sem sessão de operador -> 401 Unauthorized", async () => {
     []
   );
   assert.equal(res.status, 401);
+});
+
+test("PATCH status responde JSON e avança PENDING -> PREPARING -> READY", async () => {
+  const tenant = await seedOperationalOrder();
+
+  const first = await patchOrderStatus(
+    tenant.slug,
+    tenant.orderId,
+    "PREPARING",
+    tenant.cookies
+  );
+  assert.equal(first.status, 200);
+  assert.match(first.headers.get("content-type") ?? "", /application\/json/);
+  const firstBody = (await first.json()) as { order: { status: string } };
+  assert.equal(firstBody.order.status, "PREPARING");
+
+  const second = await patchOrderStatus(
+    tenant.slug,
+    tenant.orderId,
+    "READY",
+    tenant.cookies
+  );
+  assert.equal(second.status, 200);
+  assert.match(second.headers.get("content-type") ?? "", /application\/json/);
+  const secondBody = (await second.json()) as { order: { status: string } };
+  assert.equal(secondBody.order.status, "READY");
+});
+
+test("POST close responde JSON, fecha sessão e remove pedidos da lista operacional", async () => {
+  const tenant = await seedOperationalOrder();
+  const preparing = await patchOrderStatus(
+    tenant.slug,
+    tenant.orderId,
+    "PREPARING",
+    tenant.cookies
+  );
+  assert.equal(preparing.status, 200);
+  const ready = await patchOrderStatus(tenant.slug, tenant.orderId, "READY", tenant.cookies);
+  assert.equal(ready.status, 200);
+
+  const close = await closeSessionByHttp(tenant.slug, tenant.sessionId, tenant.cookies);
+  assert.equal(close.status, 200);
+  assert.match(close.headers.get("content-type") ?? "", /application\/json/);
+  const closeBody = (await close.json()) as {
+    summary: {
+      session: { status: string };
+      subtotal: string;
+      serviceFeeAmount: string;
+      total: string;
+    };
+  };
+  assert.equal(closeBody.summary.session.status, "CLOSED");
+  assert.equal(closeBody.summary.subtotal, "20.00");
+  assert.equal(closeBody.summary.serviceFeeAmount, "2.00");
+  assert.equal(closeBody.summary.total, "22.00");
+
+  const list = await fetch(`${BASE}/api/restaurant/${tenant.slug}/orders`, {
+    headers: { cookie: tenant.cookies.join("; ") },
+  });
+  assert.equal(list.status, 200);
+  const listBody = (await list.json()) as { orders: { id: string }[] };
+  assert.equal(
+    listBody.orders.some((order) => order.id === tenant.orderId),
+    false
+  );
 });
 
 test("slug inválido -> 400", async () => {

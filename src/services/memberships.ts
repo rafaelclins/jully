@@ -29,4 +29,28 @@ export async function getMembershipByUserAndRestaurant({
   });
 }
 
+export async function listMembershipRestaurantsForUser(
+  userId: string
+): Promise<
+  {
+    role: Membership["role"];
+    restaurant: { id: string; name: string; slug: string };
+  }[]
+> {
+  return prisma.restaurantMembership.findMany({
+    where: { userId },
+    select: {
+      role: true,
+      restaurant: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+        },
+      },
+    },
+    orderBy: [{ createdAt: "asc" }],
+  });
+}
+
 export { MembershipRole };

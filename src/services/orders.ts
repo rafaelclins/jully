@@ -390,6 +390,15 @@ function toOperationalOrderDto(
 // (session -> table) e itens vêm na mesma query (sem N+1).
 // Ordenacao: fluxo operacional (PENDING, PREPARING, READY) e, dentro de cada
 // status, os mais antigos primeiro.
+const OPERATIONAL_ORDERS_LIMIT = 500;
+
+export class OperationalOrdersLimitError extends Error {
+  constructor(limit: number) {
+    super(`Operational order list exceeded limit ${limit}`);
+    this.name = "OperationalOrdersLimitError";
+  }
+}
+
 export async function listOperationalOrdersByRestaurantId(
   restaurantId: string
 ): Promise<OperationalOrderDto[]> {
@@ -398,15 +407,20 @@ export async function listOperationalOrdersByRestaurantId(
       where: {
         restaurantId,
         status: { in: OPERATIONAL_ORDER_STATUS_LIST },
+        session: { status: SessionStatus.OPEN },
       },
       select: operationalOrderListSelect,
       orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+      take: OPERATIONAL_ORDERS_LIMIT + 1,
     }),
     prisma.restaurant.findFirst({
       where: { id: restaurantId },
       select: { currency: true },
     }),
   ]);
+  if (orders.length > OPERATIONAL_ORDERS_LIMIT) {
+    throw new OperationalOrdersLimitError(OPERATIONAL_ORDERS_LIMIT);
+  }
   const currency = restaurant?.currency ?? "BRL";
   return orders.map((order) => toOperationalOrderDto(order, currency));
 }

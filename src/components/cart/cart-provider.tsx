@@ -22,6 +22,7 @@ type CartContextValue = {
   items: CartLine[];
   totalItems: number;
   subtotalCents: number;
+  serviceFeePercent: string;
   currency: string;
   isCartOpen: boolean;
   addItem: (product: AddToCartProduct) => void;
@@ -38,12 +39,14 @@ const CartContext = createContext<CartContextValue | null>(null);
 type CartProviderProps = {
   contextId: string;
   currency: string;
+  serviceFeePercent: string;
   children: ReactNode;
 };
 
 export function CartProvider({
   contextId,
   currency,
+  serviceFeePercent,
   children,
 }: CartProviderProps) {
   const [state, dispatch] = useReducer(cartReducer, CART_INITIAL_STATE);
@@ -54,6 +57,7 @@ export function CartProvider({
       items: lines,
       totalItems: getTotalItems(lines),
       subtotalCents: getSubtotalCents(lines),
+      serviceFeePercent,
       currency,
       isCartOpen: state.isOpen,
       addItem: (product: AddToCartProduct) =>
@@ -68,7 +72,7 @@ export function CartProvider({
       openCart: () => dispatch({ type: "OPEN_CART" }),
       closeCart: () => dispatch({ type: "CLOSE_CART" }),
     };
-  }, [state, contextId, currency]);
+  }, [state, contextId, currency, serviceFeePercent]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }

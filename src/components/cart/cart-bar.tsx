@@ -20,7 +20,7 @@ export function CartBar() {
             Carrinho · {totalItems} {itemLabel}
           </p>
           <p className="text-lg font-bold leading-snug text-zinc-900">
-            {formatCurrencyCents(subtotalCents, currency)}
+            Subtotal {formatCurrencyCents(subtotalCents, currency)}
           </p>
         </div>
         <button

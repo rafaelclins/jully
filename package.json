@@ -10,6 +10,7 @@
     "test": "node scripts/test-runner.mjs",
     "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
     "security:smoke": "node scripts/security-smoke.mjs",
+    "demo:prepare": "node scripts/prepare-demo.mjs",
     "auth:create-operator": "node scripts/auth-create-operator.mjs"
   },
   "dependencies": {

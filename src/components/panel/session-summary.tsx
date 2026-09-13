@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
@@ -38,6 +39,7 @@ export function SessionSummaryView({
   const router = useRouter();
   const [summary, setSummary] = useState<SessionSummaryDto>(initialSummary);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<{
     kind: "error" | "success";
     text: string;
@@ -69,6 +71,26 @@ export function SessionSummaryView({
     const data = (await response.json()) as { summary: SessionSummaryDto };
     setSummary(data.summary);
     return data.summary;
+  }
+
+  async function handleRefresh() {
+    if (refreshing) {
+      return;
+    }
+    setRefreshing(true);
+    setNotice(null);
+    try {
+      const next = await reloadSummary();
+      setNotice(
+        next
+          ? { kind: "success", text: "Conta atualizada." }
+          : { kind: "error", text: "Não foi possível atualizar a conta." }
+      );
+    } catch {
+      setNotice({ kind: "error", text: "Não foi possível atualizar a conta." });
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   async function handleClose() {
@@ -159,13 +181,31 @@ export function SessionSummaryView({
         ) : null}
 
         <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-6">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-bold uppercase tracking-wide text-zinc-500">
-              Pedidos
-            </h2>
-            <p className="text-sm text-zinc-500">
-              Aberta em {dateTimeFormatter.format(new Date(summary.session.openedAt))}
-            </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-wide text-zinc-500">
+                Pedidos
+              </h2>
+              <p className="mt-1 text-sm text-zinc-500">
+                Aberta em {dateTimeFormatter.format(new Date(summary.session.openedAt))}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Link
+                href={`/restaurant/${restaurantSlug}/orders`}
+                className="rounded-full border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-50"
+              >
+                Voltar ao painel
+              </Link>
+              <button
+                type="button"
+                onClick={() => void handleRefresh()}
+                disabled={refreshing}
+                className="rounded-full bg-zinc-900 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {refreshing ? "Atualizando…" : "Atualizar"}
+              </button>
+            </div>
           </div>
 
           {summary.orders.length === 0 ? (

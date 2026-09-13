@@ -22,6 +22,14 @@ export function deriveTestUrl(baseUrl) {
   return u.toString();
 }
 
+export function redactDatabaseUrl(databaseUrl) {
+  const u = new URL(databaseUrl);
+  if (u.password) {
+    u.password = "****";
+  }
+  return u.toString();
+}
+
 export async function ensureTestDatabase() {
   const baseUrl = process.env.DATABASE_URL;
   const testUrl = deriveTestUrl(baseUrl);
@@ -75,7 +83,7 @@ async function main() {
     PAYMENT_PROVIDER: "fake",
   };
 
-  console.log(`[test-runner] DATABASE_URL de teste: ${testUrl}`);
+  console.log(`[test-runner] DATABASE_URL de teste: ${redactDatabaseUrl(testUrl)}`);
   execSync("npx prisma migrate deploy", { stdio: "inherit", env: runnerEnv });
 
   const tests = [...listTests("tests")];

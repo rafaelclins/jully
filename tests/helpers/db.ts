@@ -15,6 +15,38 @@ function randomId(): string {
   return randomUUID().replace(/-/g, "");
 }
 
+function databaseNameFromUrl(databaseUrl: string | undefined): string | null {
+  if (!databaseUrl) {
+    return null;
+  }
+  try {
+    return new URL(databaseUrl).pathname.split("/").filter(Boolean).at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function assertSafeTestDatabaseTarget({
+  databaseUrl,
+  actualDatabase,
+}: {
+  databaseUrl: string | undefined;
+  actualDatabase: string;
+}): string {
+  const configuredDatabase = databaseNameFromUrl(databaseUrl);
+  if (
+    !configuredDatabase ||
+    configuredDatabase !== actualDatabase ||
+    !actualDatabase.endsWith("_test") ||
+    actualDatabase === "jully_dev"
+  ) {
+    throw new Error(
+      `resetDatabase recusado: alvo inseguro (configured=${configuredDatabase ?? "<missing>"}, actual=${actualDatabase})`
+    );
+  }
+  return actualDatabase;
+}
+
 export function randomUuid(): string {
   return randomUUID();
 }
@@ -36,21 +68,31 @@ export async function resetDatabase(): Promise<void> {
     "session",
     "user",
   ];
-  const existing: string[] = [];
-  for (const table of candidates) {
-    const rows = await prisma.$queryRaw<{ n: number }[]>(Prisma.sql`
-      SELECT COUNT(*)::int AS n FROM pg_tables
-      WHERE schemaname = 'public' AND tablename = ${table}
-    `);
-    if (rows[0].n === 1) {
-      existing.push(`"${table}"`);
+  await prisma.$transaction(async (tx) => {
+    const current = await tx.$queryRaw<{ current_database: string }[]>`
+      SELECT current_database()
+    `;
+    assertSafeTestDatabaseTarget({
+      databaseUrl: process.env.DATABASE_URL,
+      actualDatabase: current[0].current_database,
+    });
+
+    const existing: string[] = [];
+    for (const table of candidates) {
+      const rows = await tx.$queryRaw<{ n: number }[]>(Prisma.sql`
+        SELECT COUNT(*)::int AS n FROM pg_tables
+        WHERE schemaname = 'public' AND tablename = ${table}
+      `);
+      if (rows[0].n === 1) {
+        existing.push(`"${table}"`);
+      }
     }
-  }
-  if (existing.length > 0) {
-    await prisma.$executeRawUnsafe(
-      `TRUNCATE TABLE ${existing.join(", ")} RESTART IDENTITY CASCADE`
-    );
-  }
+    if (existing.length > 0) {
+      await tx.$executeRawUnsafe(
+        `TRUNCATE TABLE ${existing.join(", ")} RESTART IDENTITY CASCADE`
+      );
+    }
+  });
 }
 
 export type SeedOptions = {

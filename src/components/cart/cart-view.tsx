@@ -44,11 +44,24 @@ function cartSignature(items: { productId: string; quantity: number }[]): string
     .join("|");
 }
 
+function percentLabel(value: string): string {
+  return value.replace(/0+$/, "").replace(/\.$/, "") || "0";
+}
+
+function serviceFeeCents(subtotalCents: number, serviceFeePercent: string): number {
+  const percent = Number(serviceFeePercent);
+  if (!Number.isFinite(percent) || percent <= 0) {
+    return 0;
+  }
+  return Math.round((subtotalCents * percent) / 100);
+}
+
 export function CartView({ qrToken }: CartViewProps) {
   const {
     items,
     totalItems,
     subtotalCents,
+    serviceFeePercent,
     currency,
     isCartOpen,
     closeCart,
@@ -152,6 +165,9 @@ export function CartView({ qrToken }: CartViewProps) {
   }
 
   const itemLabel = totalItems === 1 ? "item" : "itens";
+  const feeCents = serviceFeeCents(subtotalCents, serviceFeePercent);
+  const estimatedTotalCents = subtotalCents + feeCents;
+  const serviceFeeLabel = percentLabel(serviceFeePercent);
 
   return (
     <div className="fixed inset-0 z-50">
@@ -194,6 +210,9 @@ export function CartView({ qrToken }: CartViewProps) {
               <p className="mt-2 text-sm leading-relaxed text-zinc-600">
                 Em breve, seu pedido será preparado.
               </p>
+              <p className="mt-2 text-sm leading-relaxed text-zinc-600">
+                Limpamos o carrinho para evitar reenvio do mesmo pedido.
+              </p>
               <button
                 type="button"
                 onClick={handleClose}
@@ -210,23 +229,44 @@ export function CartView({ qrToken }: CartViewProps) {
             </div>
           ) : null}
 
-          {items.length === 0 ? (
+          {items.length === 0 && feedback?.kind !== "success" ? (
             <p className="py-12 text-center text-sm leading-relaxed text-zinc-500">
               Seu carrinho está vazio.
             </p>
-          ) : (
+          ) : items.length > 0 ? (
             <>
               <ul className="divide-y divide-zinc-100">
                 {items.map((line) => (
                   <CartItem key={line.productId} line={line} />
                 ))}
               </ul>
-              <div className="mt-2 flex items-baseline justify-between border-t border-zinc-200 py-4">
-                <p className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-                  Total · {totalItems} {itemLabel}
-                </p>
-                <p className="text-xl font-bold text-zinc-900">
-                  {formatCurrencyCents(subtotalCents, currency)}
+              <div className="mt-2 border-t border-zinc-200 py-4">
+                <dl className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-zinc-500">
+                      Subtotal · {totalItems} {itemLabel}
+                    </dt>
+                    <dd className="font-semibold text-zinc-900">
+                      {formatCurrencyCents(subtotalCents, currency)}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-zinc-500">
+                      Taxa de serviço {serviceFeeLabel}%
+                    </dt>
+                    <dd className="font-semibold text-zinc-900">
+                      {formatCurrencyCents(feeCents, currency)}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 border-t border-zinc-200 pt-2">
+                    <dt className="font-bold text-zinc-900">Total estimado</dt>
+                    <dd className="text-xl font-bold text-zinc-900">
+                      {formatCurrencyCents(estimatedTotalCents, currency)}
+                    </dd>
+                  </div>
+                </dl>
+                <p className="mt-3 text-xs leading-relaxed text-zinc-500">
+                  A taxa é calculada no fechamento da mesa. Este total é uma estimativa.
                 </p>
               </div>
               <button
@@ -238,7 +278,7 @@ export function CartView({ qrToken }: CartViewProps) {
                 {submitting ? "Enviando…" : "Enviar pedido"}
               </button>
             </>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

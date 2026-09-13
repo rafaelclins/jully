@@ -2,7 +2,10 @@ import { z } from "zod";
 
 import { errorResponse } from "@/lib/public-api";
 import { requireRestaurantAccess } from "@/lib/require-restaurant-access";
-import { listOperationalOrdersByRestaurantId } from "@/services/orders";
+import {
+  listOperationalOrdersByRestaurantId,
+  OperationalOrdersLimitError,
+} from "@/services/orders";
 
 const slugSchema = z
   .string()
@@ -44,6 +47,13 @@ export async function GET(
       access.context.restaurantId
     );
   } catch (error) {
+    if (error instanceof OperationalOrdersLimitError) {
+      return errorResponse(
+        503,
+        "Operational order list is too large",
+        "OPERATIONAL_ORDERS_LIMIT"
+      );
+    }
     console.error("[panel] failed to list operational orders:", error);
     return errorResponse(500, "Internal server error");
   }
