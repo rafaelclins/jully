@@ -59,6 +59,16 @@ async function closeSessionByHttp(
   });
 }
 
+async function signInEmail(email: string, password: string): Promise<Response> {
+  return fetch(`${BASE}/api/auth/sign-in/email`, {
+    method: "POST",
+    // Better Auth exige origem confiável em requests state-changing. O smoke
+    // simula navegador real; sem Origin a proteção CSRF responde 403.
+    headers: { "content-type": "application/json", origin: BASE },
+    body: JSON.stringify({ email, password }),
+  });
+}
+
 async function seedOperationalOrder(): Promise<{
   slug: string;
   sessionId: string;
@@ -131,13 +141,7 @@ async function bootstrapOperatorFor(slug: string, email: string): Promise<string
     `bootstrap de operador falhou: status ${bootstrap.status}`
   );
 
-  const signIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
-    method: "POST",
-    // Better Auth exige origem confiável em requests state-changing. O smoke
-    // simula navegador real; sem Origin a proteção CSRF responde 403.
-    headers: { "content-type": "application/json", origin: BASE },
-    body: JSON.stringify({ email, password }),
-  });
+  const signIn = await signInEmail(email, password);
   assert.equal(signIn.status, 200, "sign-in deve responder 200");
   const cookies = signIn.headers.getSetCookie().map((c) => c.split(";")[0]);
   assert.ok(cookies.length > 0, "sign-in deve devolver cookie de sessão");
@@ -171,6 +175,50 @@ test("sem sessão de operador -> 401 Unauthorized", async () => {
     []
   );
   assert.equal(res.status, 401);
+});
+
+test("form de login usa POST fallback e nao tem query na action", async () => {
+  const res = await fetch(`${BASE}/login`, { redirect: "manual" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.headers.getSetCookie(), []);
+  const html = await res.text();
+  assert.match(html, /<form[^>]*method="post"/i);
+  assert.match(html, /<form[^>]*action="\/login"/i);
+  assert.doesNotMatch(html, /<form[^>]*\?/i);
+  assert.doesNotMatch(html, /method="get"/i);
+});
+
+test("credenciais invalidas nao autenticam nem criam cookie", async () => {
+  const res = await signInEmail(
+    `login-invalid-${randomUuid()}@example.com`,
+    "WrongPass!123"
+  );
+  assert.notEqual(res.status, 200);
+  assert.deepEqual(res.headers.getSetCookie(), []);
+});
+
+test("credenciais validas autenticam, criam sessao e preservam anti-IDOR", async () => {
+  const tenant = await seedOpenSession();
+  const cookies = await bootstrapOperatorFor(
+    tenant.restaurantSlug,
+    `login-ok-${randomUuid()}@example.com`
+  );
+  assert.ok(cookies.some((cookie) => /session/i.test(cookie)));
+
+  const ownPanel = await fetch(`${BASE}/restaurant/${tenant.restaurantSlug}/orders`, {
+    headers: { cookie: cookies.join("; ") },
+  });
+  assert.equal(ownPanel.status, 200);
+
+  const crossTenant = await fetch(
+    `${BASE}/api/restaurant/${closedTenant.restaurantSlug}/orders`,
+    {
+      headers: { cookie: cookies.join("; ") },
+    }
+  );
+  assert.equal(crossTenant.status, 404);
+  const payload = (await crossTenant.json()) as { code?: string };
+  assert.equal(payload.code, "RESTAURANT_NOT_FOUND");
 });
 
 test("PATCH status responde JSON e avança PENDING -> PREPARING -> READY", async () => {

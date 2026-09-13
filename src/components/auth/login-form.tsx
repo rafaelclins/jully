@@ -20,20 +20,24 @@ export function LoginForm({ next }: { next: string }) {
     setError(null);
     setLoading(true);
 
-    const { error: signInError } = await authClient.signIn.email({
-      email,
-      password,
-    });
+    try {
+      const { error: signInError } = await authClient.signIn.email({
+        email,
+        password,
+      });
 
-    setLoading(false);
-    if (signInError) {
-      // Mensagem generica: nao revela se o email existe ou se a senha falhou.
+      if (signInError) {
+        setError("Email ou senha inválidos.");
+        return;
+      }
+
+      router.replace(next);
+      router.refresh();
+    } catch {
       setError("Email ou senha inválidos.");
-      return;
+    } finally {
+      setLoading(false);
     }
-
-    router.replace(next);
-    router.refresh();
   }
 
   return (
@@ -49,7 +53,13 @@ export function LoginForm({ next }: { next: string }) {
           Entre com suas credenciais de operador.
         </p>
 
-        <form className="mt-6 space-y-4" onSubmit={handleSubmit} noValidate>
+        <form
+          method="post"
+          action="/login"
+          className="mt-6 space-y-4"
+          onSubmit={handleSubmit}
+          noValidate
+        >
           <div>
             <label
               htmlFor="login-email"
